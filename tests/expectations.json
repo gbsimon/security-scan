@@ -211,8 +211,8 @@
     {
       "name": "commits/backdated touching only src/ is LOW (a rebase)",
       "mode": "commits",
-      "base": "HEAD~1",
-      "head": "HEAD",
+      "base": "fx/backdated-src-only^",
+      "head": "fx/backdated-src-only",
       "expect_rules": ["COMMIT-BACKDATED"],
       "expect_max_severity": "LOW",
       "forbid_rules": ["COMMIT-TOUCHES-BUILD-CONFIG"]
@@ -220,8 +220,8 @@
     {
       "name": "commits/backdated touching a build config is HIGH",
       "mode": "commits",
-      "base": "HEAD~3",
-      "head": "HEAD~2",
+      "base": "fx/backdated-config^",
+      "head": "fx/backdated-config",
       "no_diff_scan": true,
       "expect_rules": ["COMMIT-BACKDATED", "COMMIT-TOUCHES-BUILD-CONFIG"],
       "expect_max_severity": "HIGH"
@@ -239,7 +239,13 @@
       "mode": "history",
       "actors": "fixtures/test-actors.txt",
       "expect_max_severity": "CRITICAL",
-      "expect_rules": ["HIST-IOC-JADESNOW-CHARCODE127"]
+      "expect_rules": ["HIST-IOC-JADESNOW-CHARCODE127"],
+      "_comment": [
+        "forbid: a committed dependency whose minified identifiers merely",
+        "contain _p_t as a substring must NOT raise a CRITICAL. The history",
+        "greps must be as strict as the content rules they mirror."
+      ],
+      "forbid_rules": ["HIST-IOC-JADESNOW-RUNTIME-GLOBAL"]
     }
   ]
 }

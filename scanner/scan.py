@@ -1272,17 +1272,38 @@ def chunked(seq, n):
 # history mode
 # --------------------------------------------------------------------------
 
-# Patterns handed to `git grep -E`. POSIX ERE, so no \s / non-capturing tricks.
+# Patterns handed to `git grep -E`. POSIX ERE, so no \s / non-capturing tricks;
+# [[:space:]] instead.
+#
+# These MUST mirror the content rules in CRITICAL_RULES. They used to be hand-
+# written approximations, and drift in either direction is a bug:
+#   * looser than the content rule => CRITICAL false positives that the tree
+#     scan would never raise. `_p_t` as a bare substring did exactly that,
+#     flagging a committed node_modules/prettier/cli.js in two repositories
+#     because some minified identifier happened to contain those characters.
+#     A CRITICAL is supposed to mean "exact indicator matched"; one that fires
+#     on a coincidence spends the credibility the severity depends on.
+#   * stricter than the content rule => a payload that the tree scan would
+#     catch slips through the history sweep, which is the one that looks at
+#     commits nobody has checked out.
+# So each is the ERE transliteration of its Python counterpart, allowing the
+# same optional whitespace and both quote styles.
 HISTORY_GREP_PATTERNS = [
-    ("IOC-JADESNOW-CHARCODE127", r"String\.fromCharCode\(127\)"),
-    ("IOC-JADESNOW-GLOBAL-SEED", r"global\.[A-Za-z_$][A-Za-z0-9_$]*='7-"),
-    ("IOC-JADESNOW-STRINGTABLE", r"(var|let|const) _\$_[A-Za-z0-9]+="),
-    ("IOC-JADESNOW-RUNTIME-GLOBAL", r"_p_t"),
+    ("IOC-JADESNOW-CHARCODE127",
+     r"String[[:space:]]*\.[[:space:]]*fromCharCode[[:space:]]*\([[:space:]]*127[[:space:]]*\)"),
+    ("IOC-JADESNOW-GLOBAL-SEED",
+     r"global[[:space:]]*\.[[:space:]]*[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=[[:space:]]*['\"]7-"),
+    ("IOC-JADESNOW-STRINGTABLE",
+     r"(var|let|const)[[:space:]]+_\$_[A-Za-z0-9]+[[:space:]]*="),
+    ("IOC-JADESNOW-RUNTIME-GLOBAL",
+     r"(global[[:space:]]*(\.[[:space:]]*|\[[[:space:]]*['\"])(_V|_p_t)([^A-Za-z0-9_$]|$)"
+     r"|['\"]_p_t['\"])"),
     ("IOC-C2-RPC-HOST",
      r"(api\.trongrid\.io|bsc-dataseed\.binance\.org|bsc-rpc\.publicnode\.com|fullnode\.mainnet\.aptoslabs\.com)"),
     ("IOC-C2-WALLET",
      r"(TCqf6ZkaQD84vYsC2cuu1jRwB6JveTaRrF|TFMryB9m6d4kBMRjEVyFRbqKSV1cV2NcpH)"),
-    ("IOC-SPAWN-DETACHED-NODE", r"spawn\('node', ?\['-e'"),
+    ("IOC-SPAWN-DETACHED-NODE",
+     r"spawn[[:space:]]*\([[:space:]]*['\"]node['\"][[:space:]]*,[[:space:]]*\[[[:space:]]*['\"]-e['\"]"),
 ]
 
 
@@ -1893,10 +1914,20 @@ def _build_commit_fixture(tmp):
     payload = ("export default { base: './' }" + " " * 300 +
                "global.z='7-x1';var _$_dead=(function(a,b){return a})" +
                "(String.fromCharCode(127));\n")
+    def tag(name):
+        subprocess.run(["git", "-C", tmp, "-c", "core.hooksPath=/dev/null",
+                        "tag", "-f", name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       check=True)
+
     commit("chore: tidy build config", "Jane Doe",
            "jane@example.com",
            "2025-11-27T12:00:00-05:00", "2026-08-18T22:14:00+00:00",
            {"vite.config.js": payload})
+    # Tagged, not indexed. Expectations used to address these commits as
+    # HEAD~N, which silently broke every time a commit was appended to this
+    # fixture -- twice already. Tags survive that; `<tag>^` gives the base.
+    tag("fx/backdated-config")
     # A commit from a "known-malicious" identity. Both identifiers are
     # invented and live in tests/fixtures/test-actors.txt, which the selftest
     # feeds in via --actors.
@@ -1909,6 +1940,16 @@ def _build_commit_fixture(tmp):
     commit("refactor: extract helper", "Jane Doe", "jane@example.com",
            "2026-03-02T11:00:00-05:00", "2026-08-19T09:00:00+00:00",
            {"src/helper.js": "export const help = () => 3\n"})
+    tag("fx/backdated-src-only")
+    # A committed dependency whose minified identifiers merely CONTAIN the
+    # runtime-global marker as a substring. The history sweep greps every
+    # reachable object, so its patterns must be as strict as the content
+    # rules; a bare `_p_t` here used to raise a CRITICAL.
+    commit("chore: vendor a dependency", "Jane Doe", "jane@example.com",
+           "2026-04-01T10:00:00-05:00", "2026-04-01T10:00:00-05:00",
+           {"node_modules/pretty/cli.js":
+            "var chunk_p_type=1,a_p_t2=2;module.exports={chunk_p_type,a_p_t2};\n"})
+    tag("fx/vendored-substring")
     return tmp
 
 
