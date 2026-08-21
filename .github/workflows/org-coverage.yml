@@ -272,6 +272,22 @@ jobs:
               return Array.from(byName.values());
             }
 
+            // Authoritative "has this repository any commits at all?".
+            // Returns true ONLY on an explicit empty-repository answer; any
+            // other outcome returns false, so an unrelated failure shows up
+            // as an uncovered repo (a visible false alarm) rather than as a
+            // silent skip.
+            async function isEmptyRepo(o, name) {
+              try {
+                await github.rest.repos.listCommits(
+                  { owner: o, repo: name, per_page: 1 });
+                return false;
+              } catch (e) {
+                return e.status === 409
+                  && /repositor(y|ies) is empty/i.test(String(e.message || ''));
+              }
+            }
+
             const repos = await listRepos();
             core.info(`${owner}: ${repos.length} repositories visible.`);
 
@@ -287,6 +303,9 @@ jobs:
               }
               if (r.archived) { archivedSkipped.push(r.name); continue; }
               if (r.fork)     { forksSkipped.push(r.name);    continue; }
+              // Belt and braces: `default_branch` is normally set even on a
+              // repository with no commits, so this almost never fires -- see
+              // the empty-repository handling below for the real test.
               if (!r.default_branch) { emptySkipped.push(r.name); continue; }
 
               try {
@@ -307,11 +326,33 @@ jobs:
                 covered.push(entry);
                 if (entry.uses !== expectedUses) mismatched.push(entry);
               } catch (e) {
-                if (e.status === 404) {
-                  uncovered.push({ repo: r.name, branch: r.default_branch });
+                const msg = String(e.message || '');
+                const saysEmpty = /repositor(y|ies) is empty/i.test(msg);
+                if (saysEmpty) {
+                  // GitHub answers a contents request on a repo with no
+                  // commits with 404 "This repository is empty.", and a
+                  // commits request with 409 "Git Repository is empty."
+                  // Accept either, and never let it land in `errored`.
+                  emptySkipped.push(r.name);
+                } else if (e.status === 404) {
+                  // A plain 404 means the ref exists and the file does not --
+                  // genuinely uncovered. Except when the repository has no
+                  // commits at all, which is only *possible* when size is 0.
+                  //
+                  // size === 0 is necessary but NOT sufficient: measured on
+                  // this estate, a real repository with commits also reports
+                  // size 0. Treating size alone as "empty" would silently
+                  // drop a repo out of the coverage denominator -- the exact
+                  // kind of quiet miss this workflow exists to prevent. So it
+                  // is only a gate on asking git the authoritative question.
+                  if (r.size === 0 && await isEmptyRepo(owner, r.name)) {
+                    emptySkipped.push(r.name);
+                  } else {
+                    uncovered.push({ repo: r.name, branch: r.default_branch });
+                  }
                 } else {
                   errored.push({ repo: r.name,
-                                 error: `${e.status || '?'} ${e.message}` });
+                                 error: `${e.status || '?'} ${msg}` });
                 }
               }
             }
@@ -346,7 +387,7 @@ jobs:
                  list(archivedSkipped)],
                 ['skipped: forks', String(forksSkipped.length),
                  list(forksSkipped)],
-                ['skipped: no default branch', String(emptySkipped.length),
+                ['skipped: empty repository', String(emptySkipped.length),
                  list(emptySkipped)],
                 ['skipped: the scanner itself', String(selfSkipped.length),
                  list(selfSkipped)],
@@ -506,8 +547,8 @@ jobs:
                 : '',
               '',
               `Skipped as out of scope: ${r.archivedSkipped.length} archived, `
-              + `${r.forksSkipped.length} forks, ${r.emptySkipped.length} with `
-              + `no default branch, ${r.selfSkipped.length} scanner repo.`,
+              + `${r.forksSkipped.length} forks, ${r.emptySkipped.length} empty `
+              + `(no commits), ${r.selfSkipped.length} scanner repo.`,
               '',
               `Run: ${runUrl}`,
             ].join('\n');
