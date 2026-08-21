@@ -249,6 +249,45 @@ def is_prose(relpath):
     return stem.startswith(PROSE_BASENAME_PREFIXES)
 
 
+# Vendored / upstream trees. The HEURISTICS are off here; the exact-match IOC
+# rules are not.
+#
+# These directories hold code someone else released and this repository merely
+# stores: WordPress core and plugin trees, Composer/Bower/Yarn caches, Laravel
+# framework storage. The obfuscation heuristics have no precision there --
+# minified plugin bundles and column-aligned PHP look exactly like a hidden
+# append, and nobody is going to review upstream's formatting. Six of the
+# round-two failures were exactly that, all of them third-party WordPress
+# plugin code.
+#
+# What does still work there is exact matching: a known-bad hash, a wallet, a
+# JADESNOW marker in a plugin file means that plugin is backdoored, and that
+# is worth every bit as much as finding it in authored code. So the CRITICAL
+# rules run everywhere, always.
+#
+# `vendor`, `bower_components`, `.yarn`, `node_modules` are in SKIP_DIRS and
+# are not read at all -- a stronger exclusion than this one, and long-standing.
+VENDOR_PATH_SEQUENCES = (
+    ("wp-content", "plugins"),
+    ("wp-content", "mu-plugins"),
+    ("wp-content", "upgrade"),
+    ("wp-content", "uploads"),
+    ("wp-includes",),
+    ("wp-admin",),
+    ("storage", "framework"),
+)
+
+
+def is_vendored(relpath):
+    parts = logical_name(relpath).replace("\\", "/").split("/")[:-1]
+    for seq in VENDOR_PATH_SEQUENCES:
+        w = len(seq)
+        for i in range(len(parts) - w + 1):
+            if tuple(parts[i:i + w]) == seq:
+                return True
+    return False
+
+
 def is_hook_like(relpath):
     """Git/husky hooks: they run on commit, so `eval` there is not decoration."""
     relpath = logical_name(relpath).replace("\\", "/")
@@ -747,9 +786,12 @@ def scan_bytes(relpath, data, opts, allow_lines=None):
     ext = os.path.splitext(logical_name(relpath))[1].lower()
     source = ext in SOURCE_EXT
 
-    # Prose is exempt from every heuristic below. The CRITICAL IOC rules above
-    # have already run against it. See is_prose().
+    # Prose and vendored upstream trees are exempt from every heuristic below.
+    # The CRITICAL IOC rules above have already run against them. See
+    # is_prose() and is_vendored().
     if is_prose(relpath):
+        return out
+    if is_vendored(relpath) and not getattr(opts, "heuristics_in_vendor", False):
         return out
 
     # ---- HIGH: obfuscation heuristics -------------------------------------
@@ -757,12 +799,20 @@ def scan_bytes(relpath, data, opts, allow_lines=None):
     # Whitespace pad (the exact hiding trick used in the incident). Applies to
     # any non-minified source or config file.
     if cfg or scriptish or source:
+        # The signature is a pad followed by code IN A FILE THAT RUNS AT BUILD
+        # TIME. In ordinary source a long whitespace run is far more often
+        # alignment -- a PHP array padded into columns, a minified bundle --
+        # so it is reported at LOW there rather than failing the build.
+        pad_sev = "HIGH" if (cfg or scriptish or hookish) else "LOW"
         hits = 0
         for m in RE_WS_PAD.finditer(data):
             tail = data[m.end():m.end() + 120]
-            add("HIGH", "OBF-WHITESPACE-PAD", m.start(),
-                "%d whitespace chars followed by code (payload appended off-screen)"
-                % len(m.group(0)),
+            add(pad_sev, "OBF-WHITESPACE-PAD", m.start(),
+                "%d whitespace chars followed by code%s"
+                % (len(m.group(0)),
+                   " (payload appended off-screen)" if pad_sev == "HIGH"
+                   else "; in an ordinary source file this is usually column "
+                        "alignment, so it is reported rather than blocking"),
                 excerpt=tail)
             hits += 1
             if hits >= opts.max_hits_per_rule:
@@ -1895,6 +1945,7 @@ def cmd_selftest(args, opts):
             fail_on=case.get("fail_on", "HIGH"),
             min_severity="INFO",
             include_minified=case.get("include_minified", False),
+            heuristics_in_vendor=case.get("heuristics_in_vendor", False),
             max_file_size=opts.max_file_size,
             max_config_line=opts.max_config_line,
             min_entropy=opts.min_entropy,
@@ -2135,6 +2186,7 @@ def make_opts(ns):
     o.extra_hashes = load_extra_hashes(getattr(ns, "extra_hashes", None))
     o.actors = load_actors(getattr(ns, "actors", None))
     o.exclude_dirs = list(getattr(ns, "exclude_dirs", None) or [])
+    o.heuristics_in_vendor = bool(getattr(ns, "heuristics_in_vendor", False))
     return o
 
 
@@ -2169,6 +2221,12 @@ def add_common(p):
                    help="never scan a directory with this basename; repeat "
                         "for more. The scanner's own install directory is "
                         "always excluded regardless.")
+    p.add_argument("--heuristics-in-vendor", action="store_true",
+                   help="also apply the OBF-*/EXEC-* heuristics inside "
+                        "vendored upstream trees (%s). Exact-match IOC rules "
+                        "always run there regardless."
+                        % ", ".join("/".join(x) + "/**"
+                                    for x in VENDOR_PATH_SEQUENCES))
     p.add_argument("--actors", metavar="FILE",
                    help="file of known-malicious account names and email "
                         "addresses, one per line; not shipped with the "

@@ -209,6 +209,34 @@ directory.
 The exact-match IOC rules still apply to prose, so a wallet address or a
 JADESNOW marker in a `.md` is still CRITICAL. Only the guessing stops.
 
+The same applies to **vendored upstream trees** — `wp-content/plugins/`,
+`wp-content/mu-plugins/`, `wp-content/upgrade/`, `wp-content/uploads/`,
+`wp-includes/`, `wp-admin/`, `storage/framework/`. That is code someone else
+released and this repo merely stores; a minified plugin bundle or a
+column-aligned PHP array looks exactly like a hidden append, and nobody is
+going to review upstream's formatting. Exact IOC matching still runs there,
+and it is worth more than the heuristics were: a known hash or a wallet in a
+plugin file means that plugin is backdoored. `--heuristics-in-vendor` opts
+back in. (`node_modules`, `vendor`, `bower_components` and `.yarn` are not
+read at all — a stronger, long-standing exclusion.)
+
+`OBF-WHITESPACE-PAD` is HIGH only in a build config, script directory or hook
+— files that run at build time, where the pad-then-code shape is the actual
+attack. In ordinary source it is LOW: reported, not blocking.
+
+## A failed run is not a clean run
+
+If the workflow cannot check the repository out, no scan happens. That used to
+surface as *"clean at or above HIGH"* with the tracking issue auto-closed,
+because nothing was found — by a scan that never ran. The job now fails with
+*"malware-scan did not run"* and refuses to close anything.
+
+The cause seen in the wild was a **broken `.gitmodules`**: a gitlink recorded
+in the tree with no matching URL entry, which makes `actions/checkout` exit
+128. Fix the repository (`git rm --cached <path>` for the stale gitlink, or
+add the missing `[submodule]` block) — the scanner cannot scan what git will
+not hand it.
+
 ## Tuning and suppression
 
 `--fail-on` (default `HIGH`) sets what fails the run. MEDIUM findings are
