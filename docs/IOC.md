@@ -51,6 +51,13 @@ defender can take down — the C2 is public blockchain data. That is
 | `COMMIT-KNOWN-BAD-AUTHOR` | commits authored **or committed** by an identity in your `--actors` file |
 | `COMMIT-KNOWN-BAD-SHA` | `de959c6`, `a69498d`, `ea93a52` — backdated or evil-merge commits carrying the loader |
 
+The history sweep greps every reachable git object with POSIX-ERE
+transliterations of the rules above. They are kept deliberately identical in
+strength: a looser history pattern raises CRITICALs the tree scan would never
+raise (a bare `_p_t` did that, flagging a committed `node_modules` copy of
+prettier), and a stricter one lets a payload past the sweep that actually
+looks at commits nobody checked out.
+
 Only four of these actually appear as literal bytes in the samples we hold
 (`IOC-KNOWN-SHA256`, `CHARCODE127`, `GLOBAL-SEED`, `STRINGTABLE`) — the wallets,
 hosts and XOR keys live inside the scrambled string table and only surface
