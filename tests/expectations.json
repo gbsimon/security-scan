@@ -117,6 +117,20 @@
       "clean_below": "INFO"
     }
   ],
+  "tool_checkout_case": {
+    "_comment": [
+      "The reusable workflow checks this repo out into the repo under test as",
+      ".malware-scan-tool/ and runs scan.py from there. Before the fix that",
+      "made the scanner read its own IOC list and fixture corpus and report",
+      "45 CRITICAL findings against a clean caller. The scanner now always",
+      "excludes its own install directory, and says so at INFO."
+    ],
+    "name": "tree/a tool checkout inside the caller is not scanned",
+    "app": "fixtures/negative/app",
+    "tool_dir": ".malware-scan-tool",
+    "max_severity_allowed": "INFO"
+  },
+
   "git_cases": [
     {
       "name": "commits/backdated forged-author build-config change",
