@@ -1,0 +1,54 @@
+# The source of the per-repo caller. Do not copy this file by hand any more:
+#   tools/rollout.sh --owner <org-or-user> --all
+# renders it (substituting `uses:`, `trusted_authors` and `fail_on`, and
+# dropping the guard below) and opens one PR per repo. The rendering must stay
+# byte-stable, because the rollout compares hashes to decide what to skip --
+# see tools/render-caller.py before editing anything below the PREREQUISITE
+# block. Everything above it is stripped from the rendered output.
+#
+# PREREQUISITES: none.
+#
+#   gbsimon/security-scan is PUBLIC, so any repository -- in any org, or a
+#   personal one -- can call this reusable workflow and check the scanner out
+#   with the built-in GITHUB_TOKEN. No org secret, no PAT, and no
+#   "Settings -> Actions -> Access" step. That is the whole reason the scanner
+#   was published: a private scanner needs a token in every calling repo, and
+#   personal repos cannot read an org secret at all.
+#
+#   `secrets: inherit` below is kept for one case only: pointing `uses:` at a
+#   PRIVATE fork of the scanner, which then needs a `scanner_token` secret
+#   with read-only Contents on that fork. Public callers can drop it.
+#   (Alternative for either case: vendor scanner/scan.py into the repo and the
+#   cross-repo checkout is skipped automatically.)
+
+name: malware-scan
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Daily deep sweep of all reachable git objects: 06:17 UTC (02:17 Montréal). A weekly
+    # cadence would have let the July-2026 infection spread for days before detection.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  scan:
+    # This guard keeps the template inert inside security-scan itself (where
+    # selftest.yml already covers the scanner). Harmless to keep after copying;
+    # delete it if you prefer.
+    if: github.repository != 'gbsimon/security-scan'
+    uses: gbsimon/security-scan/.github/workflows/malware-scan.yml@main
+    permissions:
+      contents: read
+      issues: write
+    secrets: inherit
+    with:
+      # Commit authors expected in THIS repo. Anyone else is reported at
+      # MEDIUM, which does not fail the build -- it is a prompt to look. Set
+      # it per repo or per owner; tools/rollout.sh fills it in from
+      # ~/.config/security-scan/trusted-authors.d/<owner>. See docs/RUNBOOK.md.
+      # Left empty here on purpose: this is a public repository and those are
+      # real people's addresses.
+      trusted_authors: ""
+      fail_on: "HIGH"

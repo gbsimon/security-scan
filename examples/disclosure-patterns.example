@@ -1,0 +1,38 @@
+# Template for ~/.config/security-scan/disclosure-patterns
+#
+# tools/publish-public.sh refuses to publish if any of these matches anywhere
+# in the tree. One POSIX extended regular expression per line; '#' starts a
+# comment; matching is case-insensitive.
+#
+#   cp examples/disclosure-patterns.example \
+#      ~/.config/security-scan/disclosure-patterns
+#   chmod 600 ~/.config/security-scan/disclosure-patterns
+#   $EDITOR ~/.config/security-scan/disclosure-patterns
+#
+# Your real list belongs in that file and NOT in this repository -- a list of
+# the names you must never publish is itself a list of those names. Everything
+# below is a placeholder; replace it.
+#
+# The only string exempted from the scan is the public repository's own name
+# (the value of --repo), because it legitimately appears in every `uses:` ref.
+
+# --- organisations, clients, project or repository names ---
+example-corp
+example-client
+acme-
+proj-
+
+# --- people: account names, email domains, surnames ---
+@example\.com
+example-user
+jdoe
+
+# --- attacker identifiers ---
+#
+# If an intrusion reached you through a compromised contributor account, the
+# account name usually belongs to a victim rather than to the operator.
+# Publishing it accuses someone of an intrusion they were the first casualty
+# of, and detects nothing an operator cannot change in a minute. Keep the
+# identifiers here so they are never published, and feed them to the scanner
+# at run time with `scan.py --actors FILE` when you need to hunt for them.
+some-hijacked-account

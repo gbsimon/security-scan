@@ -1,0 +1,530 @@
+# org-coverage -- the "always" half of the rollout, for every owner.
+#
+# tools/rollout.sh installs the malware-scan caller in the repos that exist
+# today. This answers the question that matters a week later: is it still in
+# every repo, including the ones created since? Daily, per owner, it lists
+# every non-archived non-fork repo, checks whether
+# .github/workflows/malware-scan.yml is on the default branch, and keeps one
+# issue in this repo per owner listing whatever is missing -- with the exact
+# rollout.sh command that fixes it. Each issue closes itself at 100%.
+#
+# WHICH OWNERS: CONFIGURATION, NOT CODE
+#
+# This repository is public, so it names no organisations. The owner list
+# comes from the repository variable COVERAGE_OWNERS -- a comma-separated list
+# of orgs and/or user accounts -- or from the `owners` input on a manual run:
+#
+#   gh variable set COVERAGE_OWNERS --repo <owner>/security-scan \
+#     --body "acme-org,another-org,someuser"
+#
+# With neither set, the workflow does nothing and says so. Whether each owner
+# is an organisation or a user account is detected at run time, so the list is
+# just names.
+#
+# ONE TOKEN PER OWNER
+#
+# A fine-grained PAT can only be scoped to ONE resource owner, so each owner
+# needs its own secret, named COVERAGE_TOKEN_<OWNER> with the owner
+# upper-cased and every non-alphanumeric character replaced by an underscore
+# (`acme-org` -> `COVERAGE_TOKEN_ACME_ORG`).
+#
+# Each: Repository access = All repositories (the point is to see repos that
+# do not exist yet); Repository permissions = Metadata: Read-only and
+# Contents: Read-only; nothing else. See tools/sync-secret-visibility.md.
+#
+# An owner whose secret is missing is SKIPPED WITH A NOTICE, not a failure --
+# so the workflow keeps working for one owner while another is still being set
+# up.
+#
+# DELIBERATELY READ-ONLY ACROSS EVERY OWNER
+#
+# This workflow never writes to another repository. It could open the missing
+# PRs itself, but that would need Contents *and* Workflows *write* across
+# ~100 repos, living in secrets usable by anything that can trigger a workflow
+# here. That is a far larger blast radius than the problem deserves in orgs
+# compromised through a contributor account. The owner runs tools/rollout.sh
+# from his Mac instead.
+#
+# TOKEN SEPARATION IS STRUCTURAL, NOT A CONVENTION
+#
+# The survey step and the issue step are two separate `github-script` steps
+# with two different `github-token:` inputs. The step holding an owner-wide
+# PAT has no code that writes; the step that writes the issue is never handed
+# that PAT. That is stronger than two Octokit clients in one script and
+# trusting the author to pick the right one. (It is also the only form that
+# works: inside github-script `github` is an Octokit instance -- there is no
+# `github.getOctokit`.)
+#
+# Every third-party action is pinned to a full commit SHA, as in
+# malware-scan.yml.
+
+name: org-coverage
+
+on:
+  schedule:
+    # 07:23 UTC (03:23 Montréal) -- an hour after the per-repo 06:17 sweeps,
+    # so a repo fixed overnight already reads as covered.
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+    inputs:
+      owners:
+        description: >-
+          Comma-separated owners to survey. Blank uses the repository
+          variable COVERAGE_OWNERS.
+        required: false
+        type: string
+        default: ""
+      expected_uses:
+        description: "The `uses:` ref every caller should point at."
+        required: false
+        type: string
+        default: "gbsimon/security-scan/.github/workflows/malware-scan.yml@main"
+
+# contents: read  -- to check this repo out for the template and renderer.
+# issues:   write -- to open/update/close the coverage issues, in THIS repo.
+# Nothing else: no `actions: write`, no cross-repo scope.
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: org-coverage
+  cancel-in-progress: false
+
+jobs:
+  # Turns the configured owner list into a matrix. Kept in a separate job so
+  # the public tree contains no organisation names at all.
+  setup:
+    name: resolve owners
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      owners: ${{ steps.resolve.outputs.json }}
+      count: ${{ steps.resolve.outputs.count }}
+    steps:
+      - name: Resolve the owner list
+        id: resolve
+        env:
+          OWNERS_INPUT: ${{ inputs.owners }}
+          OWNERS_VAR: ${{ vars.COVERAGE_OWNERS }}
+        run: |
+          set -euo pipefail
+          RAW="${OWNERS_INPUT:-${OWNERS_VAR:-}}"
+          if [ -z "${RAW// /}" ]; then
+            echo "::notice title=no owners configured::Set the repository variable COVERAGE_OWNERS (comma-separated orgs and/or users), or pass the 'owners' input. Nothing was surveyed."
+            printf 'json=[]\ncount=0\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 - "$RAW" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, re, sys
+          seen, out = set(), []
+          for name in sys.argv[1].split(","):
+              name = name.strip()
+              if not name or name in seen:
+                  continue
+              if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", name):
+                  raise SystemExit("bad owner name: %r" % name)
+              seen.add(name)
+              # acme-org -> COVERAGE_TOKEN_ACME_ORG
+              out.append({"name": name,
+                          "secret": "COVERAGE_TOKEN_"
+                                    + re.sub(r"[^A-Za-z0-9]", "_", name).upper()})
+          print("json=" + json.dumps(out))
+          print("count=%d" % len(out))
+          PY
+          echo "Resolved $(grep -c . <<<"$RAW") owner spec(s)."
+
+  coverage:
+    name: coverage (${{ matrix.owner.name }})
+    needs: setup
+    if: needs.setup.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # One owner's missing token or throttled API must not hide the others.
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        owner: ${{ fromJSON(needs.setup.outputs.owners) }}
+    env:
+      OWNER: ${{ matrix.owner.name }}
+      EXPECTED_USES: ${{ inputs.expected_uses || 'gbsimon/security-scan/.github/workflows/malware-scan.yml@main' }}
+      RESULT_PATH: ${{ github.workspace }}/org-coverage.json
+      CALLER_PATH: ${{ github.workspace }}/expected-caller.yml
+
+    steps:
+      - name: Decide whether to survey this owner
+        id: pre
+        env:
+          # secrets can be indexed by a matrix value; this is the only way to
+          # pick one PAT of several from a matrix leg.
+          OWNER_TOKEN: ${{ secrets[matrix.owner.secret] }}
+          SECRET_NAME: ${{ matrix.owner.secret }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OWNER_TOKEN:-}" ]; then
+            echo "::notice title=no token for ${OWNER}::Secret ${SECRET_NAME} is not set, so ${OWNER} was not surveyed. This is not a failure -- see tools/sync-secret-visibility.md to add it."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Surveying ${OWNER}."
+
+      - name: Check out the scanner repo
+        if: steps.pre.outputs.skip != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Rendered so the issue can carry the exact file to paste into a repo by
+      # hand, for anyone who would rather not run the rollout script.
+      # trusted_authors is rendered EMPTY on purpose: it is a list of real
+      # people's addresses, it belongs in
+      # ~/.config/security-scan/trusted-authors.d/<owner> on the machine that
+      # runs the rollout, and it must not be typed into a public workflow.
+      - name: Render the expected caller
+        if: steps.pre.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          python3 tools/render-caller.py \
+            --template .github/workflows/caller-template.yml \
+            --uses "$EXPECTED_USES" \
+            --trusted-authors "" \
+            --fail-on HIGH \
+            --out "$CALLER_PATH"
+          echo "Rendered caller, blob $(git hash-object "$CALLER_PATH")"
+
+      # ------------------------------------------------------------------
+      # READ-ONLY. This step holds the owner-wide PAT and only ever GETs.
+      # ------------------------------------------------------------------
+      - name: Survey ${{ matrix.owner.name }}
+        if: steps.pre.outputs.skip != 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          github-token: ${{ secrets[matrix.owner.secret] }}
+          script: |
+            const fs = require('fs');
+            const owner = process.env.OWNER;
+            const expectedUses = process.env.EXPECTED_USES;
+
+            // Whether the owner is an org or a user account is discovered,
+            // not configured -- so the owner list stays a list of names and
+            // this public repository names none of them.
+            let kind = 'org';
+            try {
+              const who = await github.rest.users.getByUsername(
+                { username: owner });
+              kind = who.data.type === 'Organization' ? 'org' : 'user';
+            } catch (e) {
+              core.warning(`Could not determine whether ${owner} is an org or `
+                         + `a user (${e.status}); assuming org.`);
+            }
+            core.info(`${owner} is a ${kind}.`);
+            const wfPath = '.github/workflows/malware-scan.yml';
+
+            // The scanner repo is never a caller of itself, and the private
+            // private evidence copy of it does not need the workflow either.
+            const scannerFull = expectedUses.split('/.github/workflows/')[0];
+            const selfFull = `${context.repo.owner}/${context.repo.repo}`;
+
+            // Listing a USER's repositories is not symmetric with an org's.
+            // GET /users/{u}/repos returns only PUBLIC repos even when you are
+            // that user, which would silently report ~40 private personal
+            // repos as "no repos, 100% covered". GET /user/repos is the one
+            // that returns what the token can actually see. Do both and union
+            // them, so no endpoint quirk can hide a repo.
+            async function listRepos() {
+              const byName = new Map();
+              const sources = [];
+              const take = (rs, label) => {
+                let added = 0;
+                for (const r of rs) {
+                  if (r.owner && r.owner.login.toLowerCase()
+                      !== owner.toLowerCase()) continue;
+                  if (!byName.has(r.name)) { byName.set(r.name, r); added++; }
+                }
+                sources.push(`${label}: ${added}`);
+              };
+              if (kind === 'org') {
+                take(await github.paginate(github.rest.repos.listForOrg, {
+                  org: owner, type: 'all', per_page: 100,
+                }), 'GET /orgs/{org}/repos');
+              } else {
+                try {
+                  take(await github.paginate(
+                    github.rest.repos.listForAuthenticatedUser,
+                    { affiliation: 'owner', per_page: 100 }),
+                    'GET /user/repos');
+                } catch (e) {
+                  core.warning(`GET /user/repos failed (${e.status}): `
+                             + `${e.message}`);
+                }
+                try {
+                  take(await github.paginate(github.rest.repos.listForUser, {
+                    username: owner, type: 'owner', per_page: 100,
+                  }), 'GET /users/{user}/repos (public only)');
+                } catch (e) {
+                  core.warning(`GET /users/${owner}/repos failed `
+                             + `(${e.status}): ${e.message}`);
+                }
+              }
+              core.info(`repo sources -- ${sources.join('; ')}`);
+              return Array.from(byName.values());
+            }
+
+            const repos = await listRepos();
+            core.info(`${owner}: ${repos.length} repositories visible.`);
+
+            const covered = [], uncovered = [], mismatched = [];
+            const archivedSkipped = [], forksSkipped = [];
+            const errored = [], emptySkipped = [], selfSkipped = [];
+
+            for (const r of repos) {
+              const full = `${owner}/${r.name}`;
+              if (full === scannerFull || full === selfFull
+                  || r.name === 'security-scan') {
+                selfSkipped.push(r.name); continue;
+              }
+              if (r.archived) { archivedSkipped.push(r.name); continue; }
+              if (r.fork)     { forksSkipped.push(r.name);    continue; }
+              if (!r.default_branch) { emptySkipped.push(r.name); continue; }
+
+              try {
+                const res = await github.rest.repos.getContent({
+                  owner, repo: r.name, path: wfPath, ref: r.default_branch,
+                });
+                const raw = Buffer.from(
+                  res.data.content || '', res.data.encoding || 'base64'
+                ).toString('utf8');
+                // ONLY the `uses:` line is compared, never the file as a
+                // whole: the rest of a caller holds that repo's own
+                // trusted_authors, which is nobody else's business and must
+                // not end up quoted in an issue in this repository.
+                const m = raw.match(
+                  /^[ \t]*uses:[ \t]*(\S+\/\.github\/workflows\/\S+)[ \t]*$/m);
+                const entry = { repo: r.name, branch: r.default_branch,
+                                uses: m ? m[1] : null };
+                covered.push(entry);
+                if (entry.uses !== expectedUses) mismatched.push(entry);
+              } catch (e) {
+                if (e.status === 404) {
+                  uncovered.push({ repo: r.name, branch: r.default_branch });
+                } else {
+                  errored.push({ repo: r.name,
+                                 error: `${e.status || '?'} ${e.message}` });
+                }
+              }
+            }
+
+            const active = covered.length + uncovered.length + errored.length;
+            const pct = active === 0 ? 100
+                      : Math.round((covered.length / active) * 100);
+            fs.writeFileSync(process.env.RESULT_PATH, JSON.stringify({
+              owner, kind, expectedUses, active, pct,
+              covered, uncovered, mismatched,
+              archivedSkipped, forksSkipped, emptySkipped, selfSkipped,
+              errored,
+            }, null, 2));
+
+            const list = (a) => a.length ? a.join(', ') : '_none_';
+            await core.summary
+              .addHeading(`malware-scan coverage: ${owner} — ${pct}%`, 2)
+              .addRaw(`\n**${covered.length} of ${active}** active `
+                    + `repositories have \`${wfPath}\` on their default `
+                    + `branch.\n\n`)
+              .addTable([
+                [{ data: 'Bucket', header: true },
+                 { data: 'Count', header: true },
+                 { data: 'Repositories', header: true }],
+                ['covered', String(covered.length),
+                 list(covered.map(c => c.repo))],
+                ['**uncovered**', String(uncovered.length),
+                 list(uncovered.map(u => u.repo))],
+                ['wrong `uses:`', String(mismatched.length),
+                 list(mismatched.map(m => `${m.repo} (${m.uses || 'none'})`))],
+                ['skipped: archived', String(archivedSkipped.length),
+                 list(archivedSkipped)],
+                ['skipped: forks', String(forksSkipped.length),
+                 list(forksSkipped)],
+                ['skipped: no default branch', String(emptySkipped.length),
+                 list(emptySkipped)],
+                ['skipped: the scanner itself', String(selfSkipped.length),
+                 list(selfSkipped)],
+                ['could not be read', String(errored.length),
+                 list(errored.map(e => `${e.repo} (${e.error})`))],
+              ])
+              .write();
+
+            if (uncovered.length) {
+              core.warning(`${owner}: ${uncovered.length} repositories have `
+                         + `no malware-scan workflow: `
+                         + uncovered.map(u => u.repo).join(', '));
+            }
+
+      # ------------------------------------------------------------------
+      # WRITES -- built-in GITHUB_TOKEN only, and only in this repository.
+      # ------------------------------------------------------------------
+      - name: Open, update or close the coverage issue
+        if: always() && steps.pre.outputs.skip != 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const resultPath = process.env.RESULT_PATH;
+            if (!fs.existsSync(resultPath)) {
+              core.setFailed('The survey step produced no result; not touching '
+                           + 'the issue. Fix the survey first -- silently '
+                           + 'closing a coverage issue would be worse than '
+                           + 'failing loudly.');
+              return;
+            }
+            const r = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+            const caller = fs.existsSync(process.env.CALLER_PATH)
+              ? fs.readFileSync(process.env.CALLER_PATH, 'utf8') : '';
+
+            const { owner, repo } = context.repo;
+            const title =
+              `[org-coverage] repos without malware-scan (${r.owner})`;
+            const label = 'org-coverage';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}`
+                         + `/actions/runs/${context.runId}`;
+
+            try {
+              await github.rest.issues.createLabel({
+                owner, repo, name: label, color: '0e8a16',
+                description: 'malware-scan coverage across an owner',
+              });
+            } catch (e) { /* already exists */ }
+
+            const all = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'all', per_page: 100,
+            });
+            const existing = all.find(
+              i => i.title === title && !i.pull_request);
+
+            // `errored` counts as work: a repository the token could not read
+            // is a repository whose coverage is *unknown*. Closing on "100% of
+            // the ones I could see" is exactly the quiet false clean this repo
+            // exists to prevent.
+            const needsWork = r.uncovered.length > 0
+                           || r.mismatched.length > 0
+                           || r.errored.length > 0;
+
+            if (!needsWork) {
+              if (existing && existing.state === 'open') {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `Coverage is **${r.pct}%** — all ${r.active} active `
+                      + `repositories in \`${r.owner}\` have \`malware-scan\` `
+                      + `on their default branch, pointing at the expected `
+                      + `\`uses:\`. Closing.\n\n${runUrl}`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number,
+                  state: 'closed', state_reason: 'completed',
+                });
+                core.notice(`${r.owner}: complete; closed #${existing.number}.`);
+              } else {
+                core.notice(`${r.owner}: complete (${r.pct}%); nothing to do.`);
+              }
+              return;
+            }
+
+            const fixList = r.uncovered.map(u => u.repo)
+                             .concat(r.mismatched.map(m => m.repo));
+
+            // With only unreadable repos left there is nothing to roll out --
+            // the token is what needs fixing, so do not print a command that
+            // would do nothing.
+            const fixSection = fixList.length ? [
+              '### Fix',
+              '',
+              'From a checkout of this repository, on the machine that holds '
+              + 'your SSH key:',
+              '',
+              '```sh',
+              `tools/rollout.sh --owner ${r.owner} --repos ${fixList.join(',')}`,
+              '```',
+              '',
+              'It opens one PR per repository, is safe to re-run (repos that '
+              + 'already have the exact file are skipped without being '
+              + 'cloned), and never checks out project code — only '
+              + '`.github/workflows/`. Add `--merge` to squash-merge each PR '
+              + 'as it is opened and `--dispatch` to kick off the first '
+              + 'full-history sweep, or `--dry-run` to see the plan first.',
+              '',
+              '<details><summary>Or paste this file in by hand</summary>',
+              '',
+              '`.github/workflows/malware-scan.yml`',
+              '',
+              '```yaml',
+              caller.trimEnd(),
+              '```',
+              '',
+              '</details>',
+            ].join('\n') : [
+              '### Fix',
+              '',
+              'Every repository this token can read is covered. What is left '
+              + 'is a **visibility** problem, not a rollout one — see *Could '
+              + `not be read* below and widen the PAT for \`${r.owner}\`.`,
+            ].join('\n');
+
+            const bullet = (u) =>
+              `- \`${u.repo}\` (default branch \`${u.branch}\`)`;
+            const body = [
+              `Owner: \`${r.owner}\` (${r.kind}). Coverage: `
+              + `**${r.covered.length} of ${r.active}** active repositories `
+              + `(**${r.pct}%**).`,
+              '',
+              'This issue is rewritten by the `org-coverage` workflow every '
+              + 'day and closes itself when coverage is complete. Do not edit '
+              + 'it by hand.',
+              '',
+              `### Missing \`.github/workflows/malware-scan.yml\` (${r.uncovered.length})`,
+              '',
+              r.uncovered.length ? r.uncovered.map(bullet).join('\n')
+                                 : '_none_',
+              '',
+              `### Caller points at an unexpected \`uses:\` (${r.mismatched.length})`,
+              '',
+              `Expected \`${r.expectedUses}\`.`,
+              '',
+              r.mismatched.length
+                ? r.mismatched.map(m =>
+                    `- \`${m.repo}\` → \`${m.uses || '(no reusable-workflow call found)'}\``
+                  ).join('\n')
+                : '_none_',
+              '',
+              fixSection,
+              '',
+              r.errored.length
+                ? `### Could not be read (${r.errored.length})\n\n`
+                  + r.errored.map(e => `- \`${e.repo}\`: ${e.error}`).join('\n')
+                  + '\n\nUsually means the PAT cannot see the repository. '
+                  + 'Check it covers *All repositories* for this owner.'
+                : '',
+              '',
+              `Skipped as out of scope: ${r.archivedSkipped.length} archived, `
+              + `${r.forksSkipped.length} forks, ${r.emptySkipped.length} with `
+              + `no default branch, ${r.selfSkipped.length} scanner repo.`,
+              '',
+              `Run: ${runUrl}`,
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number,
+                body, state: 'open',
+              });
+              core.notice(`${r.owner}: updated #${existing.number} `
+                        + `(${r.uncovered.length} uncovered, `
+                        + `${r.mismatched.length} mismatched).`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner, repo, title, body, labels: [label],
+              });
+              core.notice(`${r.owner}: opened #${created.data.number} `
+                        + `(${r.uncovered.length} uncovered, `
+                        + `${r.mismatched.length} mismatched).`);
+            }

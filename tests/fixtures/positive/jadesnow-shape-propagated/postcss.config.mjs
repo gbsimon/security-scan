@@ -1,0 +1,9 @@
+// SYNTHETIC test fixture. See tests/fixtures/positive/README.md.
+// Imitates the same implant after it copied itself into a sibling
+// project's PostCSS config. Inert by construction.
+export default {
+  plugins: {
+    "tailwindcss": {},
+    "autoprefixer": {},
+  },
+};                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     /* SYNTHETIC FIXTURE -- imitates the shape of the JADESNOW loader. Contains no payload, no descrambler and no network call; nothing below runs. */ var _$_m4x9 = ["+HLO5beXBpvnTTqCoSb3KTq1weur+N4sw7BWQNjHqIFZoIAcDt79mPNSUMWMvbbLtTJR6jevz2KUwKTDZHDiLPT1+lvjAlISfHBNBrKbbWfOt6YnufLeWhH4aezzyS0py0nWeBaebJNMDgRtEi1Xjfg3S4rK+YAjsrrBgPIbFprekurmu+MdeHdhOkFfhwhlqBJJOT+ZpzP9DX3IRTaBmMZfAy5/1QAcrGo6JaOQwF3wkRDf", "\x53\x59\x4e\x54\x48\x45\x54\x49\x43\x2d\x4e\x4f\x54\x2d\x4d\x41\x4c\x57\x41\x52\x45"]; global.Kv = '7-0000000000000000000000'; var _delim = String.fromCharCode(127); if (false) { console.log(_$_m4x9.length, _delim, "hVokYRP1jimRXuUM39ld0+zUFlKhL9txrC96vkmvzYv3KidJCzLt8h7p1HaYByrs3hg2GkzmFsEM0eGUXEtOi4P39WllcDkKfSYHj1MAwLfStW4TgvlTepj9vPllH03lENyF6dj6ZQTuwI6bD1PZIMtKhW/LRlsmGd5wORQjxHc1qLwIc34NN4dYGWKnxO97sBJA3e1CKWitvolYCWgIrs4v578H"); }

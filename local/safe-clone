@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# safe-clone -- clone a repository WITHOUT ever materialising a working tree
+# that has not been scanned first.
+#
+#   safe-clone git@github.com:example-org/example-repo.git
+#   safe-clone <url> <dir> [-- <extra git clone args>]
+#
+# Order of operations (this is the whole point):
+#   1. git clone --no-checkout     -> objects on disk, no files in the tree,
+#                                     no smudge filters, no build config
+#   2. scan.py history             -> read-only sweep of every reachable object
+#   3. refuse and stop on findings -> nothing is ever written to the tree
+#   4. git checkout                -> only now do real files appear
+#   5. scan.py tree                -> belt and braces on the checked-out tree
+#
+# `git clone` itself runs no hooks from the remote, and `--no-checkout` skips
+# `.gitattributes` filters. Hooks are additionally disabled via
+# `core.hooksPath=/dev/null` and fsmonitor is forced off.
+set -uo pipefail
+
+SCAN_PY="${MALWARE_SCAN_PY:-__SCAN_PY__}"
+
+usage() { awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"; }
+
+if [ $# -lt 1 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  usage; exit 0
+fi
+if [ ! -f "$SCAN_PY" ]; then
+  echo "safe-clone: scanner not found at $SCAN_PY" >&2
+  exit 2
+fi
+
+URL="$1"; shift
+DEST=""
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then DEST="$1"; shift; fi
+if [ -z "$DEST" ]; then
+  DEST="$(basename "${URL%.git}")"
+fi
+if [ -e "$DEST" ]; then
+  echo "safe-clone: $DEST already exists; refusing to overwrite" >&2
+  exit 2
+fi
+
+GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor=false
+          -c fetch.fsckObjects=true -c transfer.fsckObjects=true)
+
+echo "==> 1/5 cloning without a working tree"
+"${GIT_SAFE[@]}" clone --no-checkout "$URL" "$DEST" "$@" || exit 2
+
+echo
+echo "==> 2/5 sweeping every reachable object for known malware"
+python3 "$SCAN_PY" history "$DEST"
+hist_rc=$?
+
+if [ "$hist_rc" -eq 1 ]; then
+  echo
+  echo "==> 3/5 REFUSING TO CHECK OUT: malware signatures found in history."
+  echo "    The bare objects are at: $DEST"
+  echo "    Do NOT check this out and do NOT build it."
+  echo "    Preserve it as evidence and follow docs/RUNBOOK.md."
+  exit 1
+elif [ "$hist_rc" -ne 0 ]; then
+  echo
+  echo "==> 3/5 scanner error during the history sweep; refusing to check out."
+  exit 2
+fi
+echo
+echo "==> 3/5 history is clean"
+
+echo
+echo "==> 4/5 checking out the default branch"
+"${GIT_SAFE[@]}" -C "$DEST" checkout || exit 2
+
+echo
+echo "==> 5/5 scanning the checked-out working tree"
+python3 "$SCAN_PY" tree "$DEST"
+tree_rc=$?
+
+if [ "$tree_rc" -eq 1 ]; then
+  echo
+  echo "safe-clone: FINDINGS in the working tree of $DEST."
+  echo "            Do not build it. See docs/RUNBOOK.md."
+  exit 1
+fi
+
+echo
+echo "safe-clone: $DEST is clean and checked out."

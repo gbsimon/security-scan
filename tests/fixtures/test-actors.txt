@@ -1,0 +1,16 @@
+# TEST-ONLY known-malicious identities.
+#
+# Passed to the scanner as `--actors` by `scan.py selftest`, so that
+# IOC-ACTOR-EMAIL, IOC-ACTOR-HANDLE and COMMIT-KNOWN-BAD-AUTHOR stay
+# exercised without this repository naming a real person.
+#
+# Every entry is invented and matches the synthetic commit fixture that
+# scan.py builds in a temp directory. The real identifiers from the incident
+# are deliberately NOT in this repository: keep them in a local file and pass
+# `--actors` yourself. See load_actors() in scanner/scan.py.
+#
+# Format: one per line; an entry containing "@" is an email, otherwise an
+# account name.
+
+mallory@example.invalid
+evilcontributor

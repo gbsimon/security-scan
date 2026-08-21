@@ -1,0 +1,14 @@
+# TEST-ONLY known-bad digests.
+#
+# Passed to the scanner as `--extra-hashes` by `scan.py selftest` so that
+# IOC-KNOWN-SHA256 stays exercised now that this repository ships no real
+# malware. These are digests of SYNTHETIC fixtures; none of them is a real
+# sample and none belongs in a production hash list.
+#
+# The real IOCs -- the digests of the two recovered JADESNOW samples -- stay
+# in scanner/scan.py (KNOWN_BAD_SHA256) and docs/IOC.md, where they are the
+# actual detection content.
+#
+# Format: <sha256>  <description>
+
+f6e77a6a0fd136efd6bf65379132ebf97cf3859b3c051cce5d4fcad13811b33e  synthetic fixture positive/knownhash/vite.config.js (test only)

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# scan-repo -- scan the current repository (or a given path) for the
+# EtherHiding / JADESNOW supply-chain implant.
+#
+#   scan-repo                 working tree + git history of $PWD
+#   scan-repo /path/to/repo   ditto for another path
+#   scan-repo --tree-only     skip the (slower) history sweep
+#   scan-repo --json          machine-readable output
+#
+# Reads bytes only. Runs no project code, no package manager, and only
+# read-only git plumbing -- never `git status`, `checkout`, `stash` or `fetch`,
+# so a repo-local `core.fsmonitor` can never be triggered by this script.
+set -uo pipefail
+
+SCAN_PY="${MALWARE_SCAN_PY:-__SCAN_PY__}"
+TREE_ONLY=0
+PASSTHRU=()
+TARGET=""
+
+# Options that take a separate value, so `--min-severity MEDIUM` is not
+# mistaken for a path. `--opt=value` works too, as does `--` for the rest.
+takes_value() {
+  case "$1" in
+    --fail-on|--min-severity|--max-commits|--max-report-commits|--time-budget|\
+    --grep-batch|--grep-timeout|--max-diff-bytes|--max-file-size|\
+    --max-config-line|--min-entropy|--min-hex-escapes|--max-hits-per-rule|\
+    --report) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tree-only) TREE_ONLY=1 ;;
+    --help|-h)
+      awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
+      exit 0 ;;
+    --) shift; PASSTHRU+=("$@"); break ;;
+    -*)
+      if takes_value "$1" && [ $# -gt 1 ]; then
+        PASSTHRU+=("$1" "$2"); shift
+      else
+        PASSTHRU+=("$1")
+      fi ;;
+    *)  TARGET="$1" ;;
+  esac
+  shift
+done
+
+TARGET="${TARGET:-$PWD}"
+if [ ! -d "$TARGET" ]; then
+  echo "scan-repo: not a directory: $TARGET" >&2
+  exit 2
+fi
+if [ ! -f "$SCAN_PY" ]; then
+  echo "scan-repo: scanner not found at $SCAN_PY" >&2
+  echo "           set MALWARE_SCAN_PY or re-run local/install.sh" >&2
+  exit 2
+fi
+
+rc=0
+
+echo "==> working tree: $TARGET"
+python3 "$SCAN_PY" tree "$TARGET" ${PASSTHRU+"${PASSTHRU[@]}"}
+tree_rc=$?
+[ "$tree_rc" -gt "$rc" ] && rc=$tree_rc
+
+if [ "$TREE_ONLY" -eq 0 ] && [ -e "$TARGET/.git" ]; then
+  echo
+  echo "==> git history: $TARGET"
+  python3 "$SCAN_PY" history "$TARGET" ${PASSTHRU+"${PASSTHRU[@]}"}
+  hist_rc=$?
+  [ "$hist_rc" -gt "$rc" ] && rc=$hist_rc
+fi
+
+echo
+case "$rc" in
+  0) echo "scan-repo: clean" ;;
+  1) echo "scan-repo: FINDINGS -- do not build this project. See docs/RUNBOOK.md." ;;
+  *) echo "scan-repo: scanner error" ;;
+esac
+exit "$rc"

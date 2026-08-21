@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.report.json
+
+# Defensive: the trusted-author list is real people's addresses and belongs
+# in ~/.config/security-scan/trusted-authors.d/, never in this repo.
+trusted-authors*
+actors

