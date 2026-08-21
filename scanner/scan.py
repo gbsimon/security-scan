@@ -52,6 +52,44 @@ EXCERPT_MAX = 160  # never print more than this many chars of a suspicious blob
 # Path classification
 # --------------------------------------------------------------------------
 
+# The scanner's own installation directory.
+#
+# The reusable workflow checks this repository out INTO the repository under
+# test (as `.malware-scan-tool/`) and then runs `tree .` from the caller's
+# root, so without this the scanner reads its own docs/IOC.md, its own rule
+# source and its whole positive-fixture corpus, and reports the tool as
+# malware. That is exactly what happened on the first real caller run: 45
+# CRITICAL findings, every one of them this file's own reference material.
+#
+# The tool's own .malwarescanignore cannot help, because an ignore file is
+# only read at the *scan root* -- which is the caller's root, not the tool's.
+# So the exclusion has to live here, and it has to be unconditional: a scanner
+# that can be made to cry wolf about itself is a scanner people learn to
+# ignore.
+TOOL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(
+    os.path.realpath(__file__))))
+
+
+def excludes_tool_root(root):
+    """True if TOOL_ROOT lies strictly below `root`, so scanning `root` would
+    otherwise walk into the scanner's own files."""
+    root = os.path.realpath(os.path.abspath(root))
+    tool = os.path.realpath(TOOL_ROOT)
+    return tool != root and is_inside(tool, root)
+
+
+def is_inside(path, parent):
+    """True if `path` is `parent` or lives under it. Symlink-safe."""
+    try:
+        path = os.path.realpath(path)
+        parent = os.path.realpath(parent)
+    except OSError:
+        return False
+    if path == parent:
+        return True
+    return path.startswith(parent.rstrip(os.sep) + os.sep)
+
+
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "bower_components", "vendor",
     "dist", "build", "out", ".next", ".nuxt", ".svelte-kit", ".astro",
@@ -876,8 +914,19 @@ def scan_git_dir(root, relroot, opts):
 # --------------------------------------------------------------------------
 
 def iter_files(root, opts):
-    """Yield (abspath, relpath) for candidate files under root."""
+    """Yield (abspath, relpath) for candidate files under root.
+
+    Never yields anything inside the scanner's own install directory, nor
+    inside a directory named by --exclude-dir.
+    """
     root = os.path.abspath(root)
+    extra = set(getattr(opts, "exclude_dirs", ()) or ())
+    # Only skip the tool when we would *stumble into* it -- i.e. it sits
+    # strictly below the path being scanned. Scanning the tool deliberately
+    # (`scan.py tree .` from its own root, which selftest.yml does, or a
+    # fixture path inside it) must still work, or the scanner could no longer
+    # check itself.
+    skip_tool = excludes_tool_root(root)
     if os.path.isfile(root):
         yield root, os.path.basename(root)
         return
@@ -885,7 +934,14 @@ def iter_files(root, opts):
         rel_dir = os.path.relpath(dirpath, root)
         if rel_dir == ".":
             rel_dir = ""
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        # Prune rather than filter at the file level: this also stops us
+        # walking into a large tool checkout at all.
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in SKIP_DIRS
+            and d not in extra
+            and not (skip_tool
+                     and is_inside(os.path.join(dirpath, d), TOOL_ROOT)))
         for name in sorted(filenames):
             rel = os.path.join(rel_dir, name) if rel_dir else name
             ext = os.path.splitext(name)[1].lower()
@@ -908,6 +964,19 @@ def cmd_tree(args, opts):
         isfile = os.path.isfile(root)
         label = "" if isfile else (os.path.basename(root.rstrip("/")) or root)
         multi = len(args.paths) > 1 and label
+
+        # Visible, never silent: if the scanner is sitting inside the tree it
+        # is scanning, the report says which directory it skipped, so nobody
+        # has to wonder why a path went unscanned.
+        if excludes_tool_root(root):
+            findings.append(Finding(
+                "INFO", "SCAN-SELF-EXCLUDED",
+                os.path.relpath(TOOL_ROOT, root), 1, "",
+                "excluded own install dir: %s" % TOOL_ROOT))
+        for name in sorted(set(getattr(opts, "exclude_dirs", ()) or ())):
+            findings.append(Finding(
+                "INFO", "SCAN-DIR-EXCLUDED", name, 1, "",
+                "excluded by --exclude-dir: %s" % name))
         ignores = IgnoreSet.load(root) if opts.use_ignore_file \
             else IgnoreSet([])
         if ignores.patterns:
@@ -1122,9 +1191,13 @@ def cmd_history(args, opts):
                 sha, path = line.split(":", 1)
                 hits.setdefault((sha, path), set())
 
-    run_pass(HISTORY_FAST_PATHSPECS, "fast")
+    # A tool checkout is untracked, so it cannot appear in history -- unless
+    # someone vendored it. Exclude it there too rather than rely on that.
+    excl = [":(exclude)%s/**" % d
+            for d in sorted(set(getattr(opts, "exclude_dirs", ()) or ()))]
+    run_pass(list(HISTORY_FAST_PATHSPECS) + excl, "fast")
     if not args.fast_only:
-        run_pass(None, "full")
+        run_pass(excl or None, "full")
 
     # Attribute rules per hit with one targeted grep per distinct path.
     cache = {}
@@ -1739,6 +1812,64 @@ def cmd_selftest(args, opts):
             print("  FAIL  %-46s %s" % (case["name"], "; ".join(detail)))
             failures.append("%s: %s" % (case["name"], "; ".join(detail)))
 
+    # ---- the tool-checkout case ------------------------------------------
+    # The reusable workflow checks the scanner out INSIDE the repository under
+    # test and runs it from there, which once made it report itself as
+    # malware. Reproducing that needs the COPY to be the running scanner --
+    # the self-exclusion is derived from the running file's own location, so
+    # exercising it with the in-repo scan.py would prove nothing. Hence a
+    # subprocess. It runs this project's own code, never scanned content.
+    tc = spec.get("tool_checkout_case")
+    if tc:
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="malware-scan-selftest-tool-")
+        try:
+            proj = os.path.join(tmp, "proj")
+            shutil.copytree(os.path.join(root, tc["app"]), proj)
+            tool = os.path.join(proj, tc.get("tool_dir", ".malware-scan-tool"))
+            shutil.copytree(TOOL_ROOT, tool, symlinks=False,
+                            ignore=shutil.ignore_patterns(
+                                ".git", "__pycache__", "*.pyc"))
+            proc = subprocess.run(
+                [sys.executable, os.path.join(tool, "scanner", "scan.py"),
+                 "tree", proj, "--fail-on", "HIGH", "--min-severity", "INFO",
+                 "--json"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            detail = []
+            try:
+                doc = json.loads(proc.stdout.decode("utf-8", "replace"))
+            except ValueError:
+                doc = None
+                detail.append("scanner produced no JSON (rc=%d)"
+                              % proc.returncode)
+            if doc is not None:
+                got = doc.get("findings", [])
+                worst = max([SEV_RANK[f["severity"]] for f in got] or [-1])
+                ceiling = SEV_RANK[tc.get("max_severity_allowed", "INFO")]
+                if worst > ceiling:
+                    detail.append(
+                        "a tool checkout inside the scanned tree produced %s: %s"
+                        % (SEVERITIES[worst],
+                           ", ".join(sorted({f["rule"] for f in got
+                                             if SEV_RANK[f["severity"]]
+                                             > ceiling}))[:200]))
+                if not any(f["rule"] == "SCAN-SELF-EXCLUDED" for f in got):
+                    detail.append("no SCAN-SELF-EXCLUDED notice: the skip "
+                                  "must be visible, not silent")
+                if proc.returncode != 0:
+                    detail.append("exit %d, want 0" % proc.returncode)
+            if detail:
+                failed += 1
+                print("  FAIL  %-46s %s" % (tc["name"], "; ".join(detail)))
+                failures.append("%s: %s" % (tc["name"], "; ".join(detail)))
+            else:
+                passed += 1
+                print("  PASS  %-46s (%s)"
+                      % (tc["name"], "tool checkout not scanned"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     # ---- git-backed cases (tmp repo, removed afterwards) ------------------
     git_cases = spec.get("git_cases", [])
     if git_cases:
@@ -1857,6 +1988,7 @@ def make_opts(ns):
     o.skip_git_dir = getattr(ns, "skip_git_dir", False)
     o.extra_hashes = load_extra_hashes(getattr(ns, "extra_hashes", None))
     o.actors = load_actors(getattr(ns, "actors", None))
+    o.exclude_dirs = list(getattr(ns, "exclude_dirs", None) or [])
     return o
 
 
@@ -1886,6 +2018,11 @@ def add_common(p):
     p.add_argument("--extra-hashes", metavar="FILE",
                    help="file of additional known-bad sha256 digests, one "
                         "per line, optionally followed by a description")
+    p.add_argument("--exclude-dir", metavar="NAME", action="append",
+                   default=[], dest="exclude_dirs",
+                   help="never scan a directory with this basename; repeat "
+                        "for more. The scanner's own install directory is "
+                        "always excluded regardless.")
     p.add_argument("--actors", metavar="FILE",
                    help="file of known-malicious account names and email "
                         "addresses, one per line; not shipped with the "
