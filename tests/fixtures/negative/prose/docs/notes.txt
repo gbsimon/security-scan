@@ -1,0 +1,4 @@
+Build notes.
+
+The bundler used to be configured with eval-based source maps (devtool: 'eval')
+which is why old stack traces look the way they do.

@@ -166,6 +166,49 @@ can currently block.
   creators; require approval for first-time contributors' workflow runs.
 - Turn on secret scanning + push protection.
 
+## When a HIGH is honest but expected
+
+CRITICAL findings are exact indicator matches -- a known hash, a wallet, a
+JADESNOW marker. There is nothing to weigh up; work the incident.
+
+MEDIUM and HIGH are heuristics, and heuristics meet real code. The three
+shapes that turned up across the org, and what to do with each:
+
+| What you see | What it usually is | What to do |
+|---|---|---|
+| `OBF-DANGEROUS-API` **MEDIUM** on a script | a genuine `eval`/`atob` with nothing else suspicious in the file | read it once. MEDIUM does not fail the build; it is a note, not an alarm |
+| `OBF-DANGEROUS-API` **HIGH** on a bundle | a vendored minified SDK that evals its own packed source | confirm the vendor and the version, then suppress it *by path*, below |
+| `COMMIT-BACKDATED` **LOW** | a rebase: author date left behind, no build-time file touched | ignore. It is LOW precisely so it does not need triage |
+
+To suppress a reviewed path, add it to `.malwarescanignore` in that repo
+**with the reasoning**, so the next person reads a decision rather than a
+mystery:
+
+    # reviewed 2026-08-21 simon: vendored blaze SDK v3.2, evals its own
+    # packed source, no network calls, pinned by integrity hash
+    scripts/api.js
+
+The scanner then emits a MEDIUM `SCAN-IGNORE-ACTIVE` listing every active
+pattern, so a suppression can never be silent, and `--no-ignore-file` shows
+everything again. Prefer a path over a rule: muting `OBF-DANGEROUS-API`
+everywhere would have hidden the real implant, which used `eval` too.
+
+**Never** suppress by disabling the workflow or widening `fail_on`.
+
+## What the heuristics deliberately skip
+
+Documentation and prose -- `.md`, `.mdx`, `.txt`, `.rst`, `.adoc`, `.html`,
+`README*`, `LICENSE*`, `CHANGELOG*`, `NOTICE*`, and anything under `docs/` --
+are exempt from the `OBF-*` and `EXEC-*` heuristics. A 200-space run in a
+Markdown table is column alignment, not a payload pushed off-screen, and a
+`curl … | sh` line in a README is an instruction to read, not a build step.
+Both cost real failures on the first org-wide sweep: a `README.md` under
+`scripts/` was being treated as a build script purely because of its parent
+directory.
+
+The exact-match IOC rules still apply to prose, so a wallet address or a
+JADESNOW marker in a `.md` is still CRITICAL. Only the guessing stops.
+
 ## Tuning and suppression
 
 `--fail-on` (default `HIGH`) sets what fails the run. MEDIUM findings are

@@ -86,11 +86,16 @@ and anything else is an account name. It feeds `IOC-ACTOR-EMAIL`,
 | `OBF-LONG-LINE` | any line > 300 chars in a build config |
 | `OBF-HIGH-ENTROPY-STRING` | string literal ≥ 200 chars with Shannon entropy ≥ 4.5 bits/char (samples: 5.03–5.66) |
 | `OBF-ESCAPE-DENSITY` | ≥ 6 `\xNN` (or ≥ 12 `\uNNNN`) escapes on one line of a build config (samples: 7) |
-| `OBF-DANGEROUS-API` | `eval(`, `new Function(`, `atob(`, `child_process`, `String.fromCharCode(`, `Buffer.from(…,'base64')`, `process.binding`, `vm.runIn*Context`, `require('http(s)')` in a build config; the first three also in `scripts/` and `.husky/` |
+| `OBF-DANGEROUS-API` | `eval(`, `new Function(`, `atob(`, `child_process`, `String.fromCharCode(`, `Buffer.from(…,'base64')`, `process.binding`, `vm.runIn*Context`, `require('http(s)')` in a build config; the first three also in `scripts/` and `.husky/`. **HIGH** in a build config or a hook, or when the file carries another obfuscation signal (long line, high-entropy string, escape density, whitespace pad); **MEDIUM** otherwise. `eval` preceded by `.` (`model.eval()`) and matches inside an f-string are not counted |
 | `EXEC-REMOTE-PIPE-SHELL` | `curl`/`wget` or `base64 -d` piped into a shell from a build/lifecycle script (MEDIUM inside a `Dockerfile`, which builds in a container rather than your shell) |
 | `PUSH-FORCED` | `github.event.forced == true` on a push |
-| `COMMIT-BACKDATED` | author date > 7 days older than committer date — the tell of the 2026-08-18 force-push wave |
+| `COMMIT-BACKDATED` | author date > 7 days older than committer date — the tell of the 2026-08 force-push wave. **HIGH** only when the commit touches a watched path (build config, lockfile, `package.json`, workflow, `.npmrc`, hook); **LOW** otherwise, because that is also what an ordinary rebase looks like |
 | `DIFF-*` | any CRITICAL pattern, or a whitespace pad, on a line **added** by the pushed range |
+
+None of the `OBF-*` or `EXEC-*` heuristics apply to documentation and prose
+(`.md`, `.mdx`, `.txt`, `.rst`, `.adoc`, `.html`, `README*`, `LICENSE*`,
+`CHANGELOG*`, `NOTICE*`, anything under `docs/`). The CRITICAL rules above
+still do. See *What the heuristics deliberately skip* in `docs/RUNBOOK.md`.
 
 ## MEDIUM — supply-chain hygiene
 

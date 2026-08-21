@@ -218,6 +218,44 @@ def is_script_like(relpath):
         "Makefile", "Dockerfile", "gulpfile.js", "Gruntfile.js")
 
 
+# Documentation and prose. The obfuscation and remote-pipe heuristics do NOT
+# apply here, because their premises do not hold:
+#   * a 200-space run in a Markdown table is column padding, not a payload
+#     hidden off the right edge of an editor;
+#   * `curl … | sh` in a README is an install instruction someone is meant to
+#     read, not a build step that runs on `npm run build`.
+# Both cost us real failures on the first org-wide sweep, and both came from
+# is_script_like(): a README under `scripts/` or `tools/` was treated as a
+# build script purely because of its parent directory.
+#
+# The exact-match IOC rules (CRITICAL) still apply to every file, prose
+# included -- a wallet address or a JADESNOW marker in a .md is still worth
+# knowing about, and those rules do not guess.
+PROSE_EXT = {".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc", ".asciidoc",
+             ".html", ".htm"}
+PROSE_BASENAME_PREFIXES = ("readme", "license", "licence", "changelog",
+                           "notice", "contributing", "authors", "copying")
+
+
+def is_prose(relpath):
+    relpath = logical_name(relpath).replace("\\", "/")
+    parts = relpath.split("/")
+    if "docs" in parts[:-1]:
+        return True
+    name = os.path.basename(relpath)
+    if os.path.splitext(name)[1].lower() in PROSE_EXT:
+        return True
+    stem = os.path.splitext(name)[0].lower()
+    return stem.startswith(PROSE_BASENAME_PREFIXES)
+
+
+def is_hook_like(relpath):
+    """Git/husky hooks: they run on commit, so `eval` there is not decoration."""
+    relpath = logical_name(relpath).replace("\\", "/")
+    parts = relpath.split("/")
+    return ".husky" in parts or "hooks" in parts[:-1]
+
+
 def is_config_like(relpath):
     return is_build_config(relpath) or is_script_like(relpath)
 
@@ -362,7 +400,7 @@ RE_LONG_STRING = re.compile(
     rb"""(['"])((?:\\.|(?!\1)[^\\\r\n]){200,})\1""")
 
 DANGEROUS_CONFIG_APIS = [
-    ("eval(", re.compile(rb"\beval\s*\(")),
+    ("eval(", re.compile(rb"(?<![\w.$])eval\s*\(")),
     ("new Function(", re.compile(rb"\bnew\s+Function\s*\(")),
     ("Function(...)(...)", re.compile(rb"\bFunction\s*\(\s*['\"]return")),
     ("atob(", re.compile(rb"\batob\s*\(")),
@@ -377,8 +415,81 @@ DANGEROUS_CONFIG_APIS = [
 ]
 
 # Subset that is dangerous even in scripts/ and .husky/
+def _in_quotes(line, col):
+    """Naive: is `col` inside a quoted run on this single line?
+
+    Limits, on purpose -- this is a cheap guard, not a parser. It does not
+    understand triple-quoted or otherwise multi-line strings, template
+    literals spanning lines, or comments. It only has to be right about the
+    common shape it was written for: a one-line message that happens to
+    mention eval().
+    """
+    quote = None
+    i = 0
+    while i < len(line) and i < col:
+        c = line[i:i + 1]
+        if quote:
+            if c == b"\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in (b'"', b"'"):
+            quote = c
+        i += 1
+    return quote is not None
+
+
+def _is_quoted_mention(data, offset):
+    """True when the match looks like text inside an f-string, not a call.
+
+    Requires BOTH an f-string prefix earlier on the line and the match being
+    inside quotes, so `eval(x)` in real code is never suppressed. Costs us
+    plain (non-f) strings and multi-line strings -- accepted; see _in_quotes.
+    """
+    start = data.rfind(b"\n", 0, offset) + 1
+    line = line_at(data, offset)
+    col = offset - start
+    before = line[:col]
+    if b'f"' not in before and b"f'" not in before:
+        return False
+    return _in_quotes(line, col)
+
+
+def first_real_call(data, rx):
+    """First match of `rx` that is not merely quoted prose."""
+    for m in rx.finditer(data):
+        if not _is_quoted_mention(data, m.start()):
+            return m
+    return None
+
+
+def has_obf_signal(data, opts):
+    """Any structural obfuscation signal in this file, reported or not.
+
+    Used to decide whether a dangerous API call is worth a HIGH. Computed
+    independently of which rules actually fire, because most OBF-* rules only
+    run on build configs and this question is asked about ordinary scripts
+    too -- a packed library in `scripts/api.js` has a 4 kB line even though
+    OBF-LONG-LINE would never report it there.
+    """
+    if RE_WS_PAD.search(data):
+        return True
+    for ln in data.split(b"\n"):
+        if len(ln) > opts.max_config_line:
+            return True
+        if len(RE_HEXESC.findall(ln)) >= opts.min_hex_escapes:
+            return True
+        if len(RE_UESC.findall(ln)) >= opts.min_hex_escapes * 2:
+            return True
+    for m in RE_LONG_STRING.finditer(data):
+        if shannon_entropy(m.group(2)) >= opts.min_entropy:
+            return True
+    return False
+
+
 DANGEROUS_SCRIPT_APIS = [
-    ("eval(", re.compile(rb"\beval\s*\(")),
+    ("eval(", re.compile(rb"(?<![\w.$])eval\s*\(")),
     ("new Function(", re.compile(rb"\bnew\s+Function\s*\(")),
     ("atob(", re.compile(rb"\batob\s*\(")),
 ]
@@ -632,8 +743,14 @@ def scan_bytes(relpath, data, opts, allow_lines=None):
 
     cfg = is_build_config(relpath)
     scriptish = is_script_like(relpath)
+    hookish = is_hook_like(relpath)
     ext = os.path.splitext(logical_name(relpath))[1].lower()
     source = ext in SOURCE_EXT
+
+    # Prose is exempt from every heuristic below. The CRITICAL IOC rules above
+    # have already run against it. See is_prose().
+    if is_prose(relpath):
+        return out
 
     # ---- HIGH: obfuscation heuristics -------------------------------------
 
@@ -678,9 +795,10 @@ def scan_bytes(relpath, data, opts, allow_lines=None):
                 if hits >= opts.max_hits_per_rule:
                     break
 
-        # Dangerous runtime APIs in a build config.
+        # Dangerous runtime APIs in a build config. Always HIGH here: a
+        # hand-written build config has no business calling eval.
         for label, rx in DANGEROUS_CONFIG_APIS:
-            m = rx.search(data)
+            m = first_real_call(data, rx)
             if m:
                 add("HIGH", "OBF-DANGEROUS-API", m.start(),
                     "build-config file uses %s" % label)
@@ -714,11 +832,23 @@ def scan_bytes(relpath, data, opts, allow_lines=None):
                 break
 
     if scriptish and not cfg:
+        # Severity depends on company. `eval` in a hook runs on every commit,
+        # so it stays HIGH. `eval` in an ordinary script next to a 4 kB packed
+        # line is the shape of a smuggled blob, so that stays HIGH too. `eval`
+        # on its own in a maintenance script is worth a look, not a build
+        # failure -- three of the six failures in the first org-wide sweep
+        # were exactly that, and one was the word "eval" inside a message.
+        obf = has_obf_signal(data, opts)
+        sev = "HIGH" if (hookish or obf) else "MEDIUM"
         for label, rx in DANGEROUS_SCRIPT_APIS:
-            m = rx.search(data)
+            m = first_real_call(data, rx)
             if m:
-                add("HIGH", "OBF-DANGEROUS-API", m.start(),
-                    "build/lifecycle script uses %s" % label)
+                add(sev, "OBF-DANGEROUS-API", m.start(),
+                    "build/lifecycle script uses %s%s" % (
+                        label,
+                        "" if sev == "HIGH"
+                        else " (no other obfuscation signal in this file; "
+                             "reported for review, not blocking)"))
         # A Dockerfile RUN executes inside the image build, not in the
         # developer's shell at `npm run build` time, so it is outside the
         # EtherHiding threat model. Still worth surfacing, one tier lower.
@@ -1417,13 +1547,23 @@ def cmd_commits(args, opts):
             delta_days = (cd - ad).total_seconds() / 86400.0
             if delta_days > skew:
                 findings.append(Finding(
-                    "HIGH", "COMMIT-BACKDATED", c["sha"], 0,
+                    # A rebase moves the committer date and leaves the
+                    # author date behind, which looks exactly like backdating.
+                    # What separated the real attack from a rebase was WHAT it
+                    # touched: the 2026-08 wave backdated commits carrying
+                    # build-config changes. No watched path, no HIGH.
+                    "HIGH" if watched else "LOW",
+                    "COMMIT-BACKDATED", c["sha"], 0,
                     redact("%s %s | author %s | committed %s | %s"
                            % (short, who, c["author_date"], c["commit_date"],
                               c["subject"])),
-                    "author date is %.1f days older than the committer date "
-                    "(> %.0f); classic backdating to hide a force-push"
-                    % (delta_days, skew),
+                    ("author date is %.1f days older than the committer date "
+                     "(> %.0f); classic backdating to hide a force-push"
+                     % (delta_days, skew)) if watched else
+                    ("author date is %.1f days older than the committer date "
+                     "(> %.0f), but the commit touches no build config, "
+                     "lockfile, workflow or hook -- the ordinary shape of a "
+                     "rebase" % (delta_days, skew)),
                     extra=dict(base_extra, skew_days=round(delta_days, 2),
                                watched_paths=watched[:20])))
             elif delta_days < -1.0:
@@ -1713,6 +1853,12 @@ def _build_commit_fixture(tmp):
     commit("updated images", "evilcontributor", "mallory@example.invalid",
            "2026-08-18T23:00:00+00:00", "2026-08-18T23:00:00+00:00",
            {"src/img.js": "export const img = 2\n"})
+    # The ordinary shape of a rebase: author date left far behind the
+    # committer date, but touching nothing that runs at build time. Must be
+    # LOW -- nine of these on one repo failed the first org-wide sweep.
+    commit("refactor: extract helper", "Jane Doe", "jane@example.com",
+           "2026-03-02T11:00:00-05:00", "2026-08-19T09:00:00+00:00",
+           {"src/helper.js": "export const help = () => 3\n"})
     return tmp
 
 
