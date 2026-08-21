@@ -97,6 +97,37 @@
       "expect_rules": ["EXEC-REMOTE-PIPE-SHELL"]
     },
     {
+      "name": "negative/prose is exempt from the OBF/EXEC heuristics",
+      "path": "fixtures/negative/prose",
+      "expect_clean": true,
+      "clean_below": "INFO",
+      "forbid_rules": [
+        "OBF-WHITESPACE-PAD", "OBF-APPENDED-PAYLOAD", "OBF-LONG-LINE",
+        "OBF-HIGH-ENTROPY-STRING", "OBF-DANGEROUS-API",
+        "EXEC-REMOTE-PIPE-SHELL"
+      ]
+    },
+    {
+      "name": "negative/eval named in an f-string or a method call",
+      "path": "fixtures/negative/pyscripts",
+      "expect_clean": true,
+      "clean_below": "INFO",
+      "forbid_rules": ["OBF-DANGEROUS-API"]
+    },
+    {
+      "name": "positive/eval of a packed blob beside a 3 KB line is HIGH",
+      "path": "fixtures/positive/packed",
+      "expect_max_severity": "HIGH",
+      "expect_rules": ["OBF-DANGEROUS-API"]
+    },
+    {
+      "name": "positive/plain eval with no obfuscation is MEDIUM",
+      "path": "fixtures/positive/eval-plain",
+      "expect_max_severity": "MEDIUM",
+      "expect_rules": ["OBF-DANGEROUS-API"],
+      "fail_on": "HIGH"
+    },
+    {
       "name": "negative/clean app (default: minified skipped)",
       "path": "fixtures/negative/app",
       "expect_clean": true,
@@ -155,6 +186,24 @@
       "trusted_authors": "jane@example.com",
       "forbid_rules": ["COMMIT-KNOWN-BAD-AUTHOR", "IOC-ACTOR-EMAIL",
                        "IOC-ACTOR-HANDLE"]
+    },
+    {
+      "name": "commits/backdated touching only src/ is LOW (a rebase)",
+      "mode": "commits",
+      "base": "HEAD~1",
+      "head": "HEAD",
+      "expect_rules": ["COMMIT-BACKDATED"],
+      "expect_max_severity": "LOW",
+      "forbid_rules": ["COMMIT-TOUCHES-BUILD-CONFIG"]
+    },
+    {
+      "name": "commits/backdated touching a build config is HIGH",
+      "mode": "commits",
+      "base": "HEAD~3",
+      "head": "HEAD~2",
+      "no_diff_scan": true,
+      "expect_rules": ["COMMIT-BACKDATED", "COMMIT-TOUCHES-BUILD-CONFIG"],
+      "expect_max_severity": "HIGH"
     },
     {
       "name": "commits/force-push flag raises a HIGH on its own",
