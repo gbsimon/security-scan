@@ -732,7 +732,7 @@ while IFS="$TAB" read -r name archived fork defbranch visibility; do
   elif [ "${fork:-false}" = "true" ] && [ "$INCLUDE_FORKS" -eq 0 ]; then
     reason="fork"
   elif [ -z "${defbranch:-}" ] || [ "$defbranch" = "-" ]; then
-    reason="no default branch (empty repo, or not readable)"
+    reason="empty repository"
   fi
   if [ -n "$reason" ]; then
     printf '  - %s (%s)\n' "$name" "$reason" >> "$EXCLUDED_TXT"
