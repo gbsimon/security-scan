@@ -169,6 +169,17 @@
       "clean_below": "INFO"
     }
   ],
+  "gitlink_case": {
+    "_comment": [
+      "A gitlink in HEAD's tree with no .gitmodules url. It broke CI outright:",
+      "actions/checkout runs `git submodule foreach` during credential setup",
+      "whether or not submodules are enabled, and that exits 128, so the repo",
+      "could not be checked out at all. LOW -- report it, never fail on it."
+    ],
+    "name": "tree/dangling submodule gitlink is reported at LOW",
+    "path": "wp-content/themes/eversaplus"
+  },
+
   "tool_checkout_case": {
     "_comment": [
       "The reusable workflow checks this repo out into the repo under test as",

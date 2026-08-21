@@ -115,7 +115,10 @@ postinstall/prepare running a downloader or interpreter), `PKG-NONREGISTRY-DEP`
 `NPMRC-UNSAFE` (`ignore-scripts=false`, `unsafe-perm=true`, embedded tokens),
 `NPMRC-FOREIGN-REGISTRY`, `GITHOOK-PRESENT`, `GITHOOK-DANGEROUS`,
 `GITCFG-HOOKSPATH`, `GITCFG-FSMONITOR`, `GITCFG-SSHCOMMAND`,
-`GHA-UNPINNED-ACTION`, `GHA-PULL-REQUEST-TARGET`, `COMMIT-AUTHOR-UNKNOWN`,
+`GIT-DANGLING-GITLINK` (LOW — a `160000` tree entry with no `url` in
+`.gitmodules`: nothing can clone it, a later edit could point it at any
+repository, and `git submodule foreach` fails so CI cannot check the repo
+out), `GHA-UNPINNED-ACTION`, `GHA-PULL-REQUEST-TARGET`, `COMMIT-AUTHOR-UNKNOWN`,
 `COMMIT-OUT-OF-ORDER`, `COMMIT-FUTURE-DATED`, `COMMIT-TRUSTED-AUTHOR-UNSIGNED`,
 `SCAN-IGNORE-ACTIVE`, `SCAN-COMMITS-TRUNCATED`, `SCAN-TIME-BUDGET`.
 

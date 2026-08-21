@@ -231,11 +231,30 @@ surface as *"clean at or above HIGH"* with the tracking issue auto-closed,
 because nothing was found — by a scan that never ran. The job now fails with
 *"malware-scan did not run"* and refuses to close anything.
 
-The cause seen in the wild was a **broken `.gitmodules`**: a gitlink recorded
-in the tree with no matching URL entry, which makes `actions/checkout` exit
-128. Fix the repository (`git rm --cached <path>` for the stale gitlink, or
-add the missing `[submodule]` block) — the scanner cannot scan what git will
-not hand it.
+### The dangling-gitlink case
+
+The cause seen in the wild was a **stale gitlink**: a `160000` entry in the
+tree with no matching `url` in `.gitmodules`. `actions/checkout` runs
+`git submodule foreach --recursive` during its credential setup and teardown
+**whether or not `submodules` is enabled** — measured, the log prints
+`submodules: false` and runs it anyway — and that command exits 128 on such a
+tree.
+
+The important detail: it fails *after* the worktree is fully populated. So the
+workflow no longer treats a failed checkout as fatal. It checks whether HEAD
+resolves and the tree is non-empty; if so it scans it and says why, and only
+falls back to a manual clone (which runs no submodule command at all) when
+there is genuinely nothing there. If even that fails, the run fails — it never
+proceeds to report clean.
+
+It also scrubs any credential the interrupted teardown left behind:
+`persist-credentials: false` promises no usable token in `.git/config`, and a
+checkout that dies mid-teardown can break that promise inside a tree we are
+about to scan for malware.
+
+The scan reports the underlying problem as `GIT-DANGLING-GITLINK` (LOW). Fix
+the repository properly with `git rm --cached <path>` for the stale gitlink,
+or add the missing `[submodule]` block with its `url`.
 
 ## Tuning and suppression
 
