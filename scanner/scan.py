@@ -1031,6 +1031,70 @@ def scan_workflow(relpath, data, opts):
     return out
 
 
+RE_GITMODULES_PATH = re.compile(r"^\s*path\s*=\s*(.+?)\s*$", re.M)
+
+
+def scan_gitlinks(root, relroot, opts):
+    """Gitlinks in HEAD's tree with no usable .gitmodules entry.
+
+    A gitlink (mode 160000) records "a commit of some other repository lives
+    here". If .gitmodules does not say WHICH repository, the entry points
+    nowhere: nobody can reproduce the tree, and `git submodule foreach` --
+    which actions/checkout runs during its credential setup whether or not
+    submodules are enabled -- exits 128, so CI cannot check the repo out at
+    all. That is how one repository in this estate became unscannable.
+
+    It is also a mild supply-chain smell in its own right: a dangling gitlink
+    is what is left behind when a dependency is swapped out carelessly, and a
+    later `.gitmodules` edit could silently point that path at any repository
+    on the internet. LOW -- worth telling someone, never worth failing a build.
+
+    Read-only plumbing (`ls-tree`), consistent with the rest of this file: no
+    status, no checkout, no fetch.
+    """
+    out = []
+    if not os.path.isdir(os.path.join(root, ".git")):
+        return out
+    rc, stdout, _ = git(root, ["ls-tree", "-r", "-z", "HEAD"], check=False)
+    if rc != 0:
+        return out
+    links = []
+    for rec in stdout.split(b"\x00"):
+        if not rec.startswith(b"160000"):
+            continue
+        parts = rec.split(b"\t", 1)
+        if len(parts) == 2:
+            links.append(parts[1].decode("utf-8", "replace"))
+    if not links:
+        return out
+
+    declared = set()
+    gm = os.path.join(root, ".gitmodules")
+    if os.path.isfile(gm):
+        try:
+            with open(gm, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            text = ""
+        # A path only counts as declared if its section also carries a url.
+        for block in re.split(r"(?m)^\s*\[submodule\s", text)[1:]:
+            paths = RE_GITMODULES_PATH.findall(block)
+            if paths and re.search(r"(?m)^\s*url\s*=\s*\S", block):
+                declared.update(paths)
+
+    for link in sorted(links):
+        if link in declared:
+            continue
+        rel = os.path.join(relroot, ".gitmodules") if relroot else ".gitmodules"
+        out.append(Finding(
+            "LOW", "GIT-DANGLING-GITLINK", rel, 1, redact(link),
+            "dangling submodule gitlink at %s: the tree records a commit of "
+            "another repository there, but .gitmodules gives no url for it. "
+            "Nothing can clone it, and `git submodule foreach` fails, which "
+            "breaks CI checkouts." % link))
+    return out
+
+
 def scan_git_dir(root, relroot, opts):
     """Read-only audit of .git/config and .git/hooks. Never runs git here."""
     out = []
@@ -1209,6 +1273,7 @@ def cmd_tree(args, opts):
             findings.extend(fs)
         if not opts.skip_git_dir:
             findings.extend(scan_git_dir(root, label if multi else "", opts))
+            findings.extend(scan_gitlinks(root, label if multi else "", opts))
     elapsed = time.time() - started
     meta = {"mode": "tree", "paths": [os.path.abspath(p) for p in args.paths],
             "files_scanned": scanned, "elapsed_sec": round(elapsed, 2)}
@@ -2049,6 +2114,69 @@ def cmd_selftest(args, opts):
             failed += 1
             print("  FAIL  %-46s %s" % (case["name"], "; ".join(detail)))
             failures.append("%s: %s" % (case["name"], "; ".join(detail)))
+
+    # ---- dangling-gitlink case -------------------------------------------
+    gl = spec.get("gitlink_case")
+    if gl:
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="malware-scan-selftest-gitlink-")
+        try:
+            def g(*argv):
+                subprocess.run(["git", "-C", tmp,
+                                "-c", "core.hooksPath=/dev/null",
+                                "-c", "user.name=Jane Doe",
+                                "-c", "user.email=jane@example.com",
+                                "-c", "commit.gpgsign=false"] + list(argv),
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=True)
+            g("init", "-q", "-b", "main", ".")
+            with open(os.path.join(tmp, "README.md"), "w") as fh:
+                fh.write("# fixture\n")
+            g("add", "-A")
+            g("commit", "-qm", "init")
+            head = subprocess.run(["git", "-C", tmp, "rev-parse", "HEAD"],
+                                  stdout=subprocess.PIPE,
+                                  check=True).stdout.decode().strip()
+            # A gitlink with no .gitmodules entry: the shape that makes
+            # `git submodule foreach` exit 128 and breaks CI checkouts.
+            g("update-index", "--add", "--cacheinfo",
+              "160000,%s,%s" % (head, gl["path"]))
+            g("commit", "-qm", "add a stale gitlink")
+            a = _A()
+            a.paths = [tmp]
+            a.report = None
+            a.json = False
+            a.github = False
+            a.include_minified = False
+            a.skip_git_dir = False
+            o = make_opts(argparse.Namespace(
+                fail_on="HIGH", min_severity="INFO",
+                no_ignore_file=True, skip_git_dir=False))
+            res, rc = cmd_tree(a, o)
+            detail = []
+            if rc == 2:
+                detail.append("scanner error")
+            else:
+                got = [f for f in res[0] if f.rule == "GIT-DANGLING-GITLINK"]
+                if not got:
+                    detail.append("no GIT-DANGLING-GITLINK finding")
+                elif got[0].severity != "LOW":
+                    detail.append("severity %s, want LOW" % got[0].severity)
+                elif gl["path"] not in got[0].excerpt:
+                    detail.append("finding does not name the path")
+                worst = max([SEV_RANK[f.severity] for f in res[0]] or [-1])
+                if worst > SEV_RANK["LOW"]:
+                    detail.append("a stale gitlink must not exceed LOW")
+            if detail:
+                failed += 1
+                print("  FAIL  %-46s %s" % (gl["name"], "; ".join(detail)))
+                failures.append("%s: %s" % (gl["name"], "; ".join(detail)))
+            else:
+                passed += 1
+                print("  PASS  %-46s (%s)" % (gl["name"], "LOW, names the path"))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     # ---- the tool-checkout case ------------------------------------------
     # The reusable workflow checks the scanner out INSIDE the repository under
