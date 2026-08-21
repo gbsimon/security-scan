@@ -128,6 +128,27 @@
       "fail_on": "HIGH"
     },
     {
+      "name": "negative/vendored WordPress tree: heuristics off, IOCs on",
+      "path": "fixtures/negative/wpsite",
+      "expect_clean": true,
+      "clean_below": "INFO",
+      "forbid_rules": ["OBF-WHITESPACE-PAD", "OBF-LONG-LINE",
+                       "OBF-HIGH-ENTROPY-STRING", "OBF-DANGEROUS-API"]
+    },
+    {
+      "name": "negative/--heuristics-in-vendor opts the same tree back in",
+      "path": "fixtures/negative/wpsite",
+      "heuristics_in_vendor": true,
+      "expect_max_severity": "LOW",
+      "expect_rules": ["OBF-WHITESPACE-PAD"]
+    },
+    {
+      "name": "negative/column-padded PHP outside a vendor tree is LOW",
+      "path": "fixtures/negative/phpalign",
+      "expect_max_severity": "LOW",
+      "expect_rules": ["OBF-WHITESPACE-PAD"]
+    },
+    {
       "name": "negative/clean app (default: minified skipped)",
       "path": "fixtures/negative/app",
       "expect_clean": true,

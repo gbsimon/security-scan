@@ -81,7 +81,7 @@ and anything else is an account name. It feeds `IOC-ACTOR-EMAIL`,
 
 | Rule id | Trigger |
 |---|---|
-| `OBF-WHITESPACE-PAD` | ≥ 100 consecutive spaces/tabs followed by code (the samples use 709) |
+| `OBF-WHITESPACE-PAD` | ≥ 100 consecutive spaces/tabs followed by code (the samples use 709). **HIGH** in a build config, script directory or hook — where the shape is the attack; **LOW** in ordinary source, where it is usually column alignment |
 | `OBF-APPENDED-PAYLOAD` | module terminator, then a pad, then > 100 chars of code on the same line |
 | `OBF-LONG-LINE` | any line > 300 chars in a build config |
 | `OBF-HIGH-ENTROPY-STRING` | string literal ≥ 200 chars with Shannon entropy ≥ 4.5 bits/char (samples: 5.03–5.66) |
@@ -92,7 +92,10 @@ and anything else is an account name. It feeds `IOC-ACTOR-EMAIL`,
 | `COMMIT-BACKDATED` | author date > 7 days older than committer date — the tell of the 2026-08 force-push wave. **HIGH** only when the commit touches a watched path (build config, lockfile, `package.json`, workflow, `.npmrc`, hook); **LOW** otherwise, because that is also what an ordinary rebase looks like |
 | `DIFF-*` | any CRITICAL pattern, or a whitespace pad, on a line **added** by the pushed range |
 
-None of the `OBF-*` or `EXEC-*` heuristics apply to documentation and prose
+None of the `OBF-*` or `EXEC-*` heuristics apply to vendored upstream trees
+(`wp-content/plugins/`, `wp-content/mu-plugins/`, `wp-content/upgrade/`,
+`wp-content/uploads/`, `wp-includes/`, `wp-admin/`, `storage/framework/`;
+`--heuristics-in-vendor` opts back in), nor to documentation and prose
 (`.md`, `.mdx`, `.txt`, `.rst`, `.adoc`, `.html`, `README*`, `LICENSE*`,
 `CHANGELOG*`, `NOTICE*`, anything under `docs/`). The CRITICAL rules above
 still do. See *What the heuristics deliberately skip* in `docs/RUNBOOK.md`.
